@@ -1,0 +1,5 @@
+---
+triple:          'arm64-apple-darwin'
+binary-path:     '/Users/hiroyukih/vscode/Gasyori100knock/test'
+relocations:     []
+...
