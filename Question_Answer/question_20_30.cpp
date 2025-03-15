@@ -302,14 +302,77 @@ cv::Mat Bicubic(cv::Mat img,double mag = 1.5) {
   return out;
 }
 
+
 cv::Mat answer26(cv::Mat img)
 {
   return Bicubic(img,1.5);
 }
 
+#include <opencv2/imgproc.hpp>  // warpAffine を使うために必要
+#include <opencv2/opencv.hpp>
+
+cv::Mat affine(cv::Mat img, double a, double b, double c, double d, double tx, double ty)
+{
+  int w = img.cols;
+  int h = img.rows;
+  int ch_num = img.channels();
+  int ow = a*w;
+  int oh = d*h;
+
+  cv::Mat out = cv::Mat::zeros(oh,ow,CV_8UC3);
+
+  double a0 = (a*d - b *c);
+
+  for(int ch=0;ch<ch_num;ch++) {
+    for(int y=0;y<oh;y++) {
+      for(int x=0;x<ow;x++) {
+          int xx = ( d*x - b*y)/a0 - tx;
+          int yy = (-c*x + a*y)/a0 - ty;
+          int value= 0;
+          // xx = min(max(xx,0 ),255);
+          // yy = min(max(xx,0 ),255);
+          if( xx >=0 and xx <w and yy >= 0 and yy < h) {
+            value = img.at<cv::Vec3b>(yy,xx)[ch];
+          }else{
+            value = 0;
+          }
+        out.at<cv::Vec3b>(y,x)[ch] = value;
+      } 
+    }
+  }
+
+  return out;
+}
+
+cv::Mat answer28(cv::Mat img)
+{
+  return affine(img,1,0,0,1,30,-30);
+}
+
+cv::Mat answer29(cv::Mat img)
+{
+  return affine(img,1.3,0,0,0.8,0,0);
+}
+
+cv::Mat answer30(cv::Mat img)
+{
+  double angle = -30 * M_PI / 180;
+
+  //center
+  double cx = img.cols/2.;
+  double cy = img.rows/2.;
+  double a0 = (cos(angle)*cos(angle)+ sin(angle) *sin(angle));
+  double n_cx = ( cos(angle)*cx + sin(angle)*cy) / a0;
+  double n_cy = (-sin(angle)*cx + cos(angle)*cy) / a0;
+  double tx = n_cx - cx;
+  double ty = n_cy - cy;
+
+  return affine(img,cos(angle),-sin(angle),sin(angle),cos(angle),tx,ty);
+}
+
 int main(int argc, const char* argv[]){
   cv::Mat img = cv::imread("../Question_21_30/imori.jpg",cv::IMREAD_COLOR);
-  cv::Mat out = answer26(img);
+  cv::Mat out = answer30(img);
   cv::imshow("sample", out);
   cv::waitKey(0);
   cv::destroyAllWindows(); 
