@@ -164,24 +164,24 @@ hist = HOG_step2(magnitude,gradient_quantized)
 
 hist = HOG_step3(hist)
 
-out  = draw_HOG(img,hist)
+# out  = draw_HOG(img,hist)
 
 # cv2.imwrite("out.jpg", out)
 
 # write histogram to file
-# for i in range(9):
-#     plt.subplot(3,3,i+1)
-#     plt.imshow(hist[..., i])
-#     plt.axis('off')
-#     plt.xticks(color="None")
-#     plt.yticks(color="None")
+for i in range(9):
+    plt.subplot(3,3,i+1)
+    plt.imshow(hist[..., i])
+    plt.axis('off')
+    plt.xticks(color="None")
+    plt.yticks(color="None")
 
 end_time = time.time()
 elapsed_time = end_time - start_time
 print(f"処理時間: {elapsed_time} 秒")
-# plt.show()
+plt.show()
 # Save result
-cv2.imwrite("out.jpg", out)
-cv2.imshow("result", out)
-cv2.waitKey(0)
-cv2.destroyAllWindows()
+# cv2.imwrite("out.jpg", out)
+# cv2.imshow("result", out)
+# cv2.waitKey(0)
+# cv2.destroyAllWindows()
