@@ -56,6 +56,9 @@
         "algorithm": "cpp",
         "dense": "cpp",
         "complex": "cpp",
-        "map": "cpp"
+        "map": "cpp",
+        "sstream": "cpp",
+        "__config": "cpp",
+        "iomanip": "cpp"
     }
 }

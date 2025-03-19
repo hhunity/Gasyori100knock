@@ -43,10 +43,9 @@ public:
         return *this;
     }
     void set_data(t data) { for ( auto &a : vec ) { a = data;}}
+    void set_size(int in_rows,int in_cols){rows = in_rows;cols = in_cols;vec.resize(size());}
     void copy_from_vector(const vector<vector<t>>& other) {
-        rows = other.size();
-        cols = other[0].size();
-        vec.resize(size());
+        set_size(other.size(),other[0].size());
         for (int j=0;j<rows;j++) {
             for( int i=0;i<cols;i++) {
               vec[j*cols+i] = other[j][i];
@@ -133,20 +132,24 @@ public:
         cblas_daxpy(out.size(),alpha, mat1.data(), 1, out.data(), 1);
     }
 
-    Mat<double> sigmoid(const Mat<double>& x) {
-        Mat<double> res(x.get_rows(),x.get_cols());
-        for (size_t i = 0; i < x.size(); i++) {
-            res[i] = 1.0 / (1.0 + exp(-x[i]));
+   void sigmoid(const Mat<double>& x,Mat<double> &out) {
+        
+        if(out.size()==0) {
+            out.set_size(x.get_rows(),x.get_cols());
         }
-        return res;
+        
+        for (size_t i = 0; i < x.size(); i++) {
+            out[i] = 1.0 / (1.0 + exp(-x[i]));
+        }
+        return;
     }
 
     vector<double> forward(const vector<vector<double>>& x) {
         
         z1.copy_from_vector(x);
-        z2  = sigmoid(add_bias(matmul(z1, w2_mat), b2_mat));
-        z3  = sigmoid(add_bias(matmul(z2, w3_mat), b3_mat));
-        out = sigmoid(add_bias(matmul(z3, wout_mat), bout_mat));
+        sigmoid(add_bias(matmul(z1, w2_mat), b2_mat),z2);
+        sigmoid(add_bias(matmul(z2, w3_mat), b3_mat),z3);
+        sigmoid(add_bias(matmul(z3, wout_mat), bout_mat),out);
 
         vector<double> out_vec(out.size());
         for(int i=0;i<out.size();i++) {out_vec[i]=out[i];}
