@@ -43,11 +43,13 @@ public:
         return *this;
     }
     void set_data(t data) { for ( auto &a : vec ) { a = data;}}
-    void set_size(int in_rows,int in_cols){
+    bool set_size(int in_rows,int in_cols){
         if(in_rows!=rows or in_cols!=cols) {
             _set_size(in_rows,in_cols);
             vec.resize(size());
+            return true;
         }
+        return false;
     }
     void copy_from_vector(const vector<vector<t>>& other) {
         set_size(other.size(),other[0].size());
@@ -136,8 +138,9 @@ public:
         return res;
     }
     
-    void sum(const Mat<double>& mat1,Mat<double>& out,double alpha) {
+    Mat<double>& sum(const Mat<double>& mat1,Mat<double>& out,double alpha) {
         cblas_daxpy(out.size(),alpha, mat1.data(), 1, out.data(), 1);
+        return out;
     }
 
     Mat<double>& sigmoid(const Mat<double>& x,Mat<double> &out) {
@@ -165,7 +168,9 @@ public:
         int data_n= t.size();
         
         ///
-        one.set_size(data_n,1);one.set_data(1.0);
+        if(one.set_size(data_n,1)){
+            one.set_data(1.0);
+        }
         out_d.set_size(out.get_rows(),out.get_cols());
         
         for (size_t i = 0; i < out_d.size(); i++) {
@@ -174,19 +179,21 @@ public:
         }
         out_dw = matmul(z3 , out_d, out_dw, CblasTrans  ,CblasNoTrans);
         out_db = matmul(one, out_d, out_db, CblasTrans  ,CblasNoTrans);
-        sum(out_dw,wout_mat,-lr);
-        sum(out_db,bout_mat,-lr);
+        wout_mat= sum(out_dw,wout_mat,-lr);
+        bout_mat= sum(out_db,bout_mat,-lr);
         
         ///
-		Mat<double> one2(z3.get_rows(),z3.get_cols());one2.set_data(1.0);
+		if( one2.set_size(z3.get_rows(),z3.get_cols()) ) {
+            one2.set_data(1.0);
+        }
         w3_d = matmul(out_d , wout_mat,w3_d , CblasNoTrans  ,CblasTrans);
         for (size_t i = 0; i < w3_d.size(); i++) {
             w3_d[i] = w3_d[i] * (z3[i] * (1 - z3[i]));
         }
         w3_dw = matmul(z3 ,w3_d,w3_dw,CblasTrans ,CblasNoTrans);
         w3_db = matmul(one2,w3_d,w3_db,CblasTrans ,CblasNoTrans);
-        sum(w3_dw,w3_mat,-lr);
-        sum(w3_db,b3_mat,-lr);
+        w3_mat= sum(w3_dw,w3_mat,-lr);
+        b3_mat= sum(w3_db,b3_mat,-lr);
 
         ///
         w2_d  = matmul(w3_d , w3_mat,w2_d,CblasNoTrans  ,CblasTrans);
@@ -195,8 +202,8 @@ public:
         }
         w2_dw = matmul(z1   , w2_d,w2_dw,CblasTrans ,CblasNoTrans);
         w2_db = matmul(one  , w2_d,w2_db,CblasTrans ,CblasNoTrans);
-        sum(w2_dw,w2_mat,-lr);
-        sum(w2_db,b2_mat,-lr);
+        w2_mat= sum(w2_dw,w2_mat,-lr);
+        b2_mat= sum(w2_db,b2_mat,-lr);
 
     }
 };
