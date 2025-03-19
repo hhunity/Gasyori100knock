@@ -79,14 +79,15 @@ private:
     double lr;
     Mat<double> w2_mat, b2_mat, w3_mat, b3_mat, wout_mat, bout_mat;
     Mat<double> z1, z2, z3, out;
-    Mat<double> one,out_d,out_dw,out_db,one2,w3_d,w3_d2,w3_db;
+    Mat<double> one,out_d,out_dw,out_db,one2,w3_d,w3_d2,w3_dw,w3_db,w2_d,w2_dw,w2_db;
 public:
     NN(int ind = 2, int w = 64, int w2 = 64, int outd = 1, double lr = 0.1)
         : lr(lr),
           w2_mat(ind,w,"w2"), b2_mat(1,w,"b2"),w3_mat(w,w2,"w3"), b3_mat(1,w2,"b3"),
           wout_mat(w2,outd,"wout"), bout_mat(outd,1,"bout"),
           z1("z1"),z2("z2"),z3("z3"),one("one"),out_d("out_d"),
-          out_dw("out_dw"),out_db("out_db"),one2("one2"),w3_d("w3_d"),w3_d2("w3_d2"),w3_db("w3_db")
+          out_dw("out_dw"),out_db("out_db"),one2("one2"),w3_d("w3_d"),w3_d2("w3_d2"),w3_db("w3_db"),
+          w3_dw("w3_dw"),w2_d("w2_d"),w2_dw("w2_dw"),w2_db("w2_db")
           {
 
         mt19937 gen(0);
@@ -108,17 +109,16 @@ public:
         A( M X K ) x ( K x N) B = C (M x N)
         http://azalea.s35.xrea.com/blas/gemm.html
     */
-   Mat<double> matmul(const Mat<double>& A, const Mat<double>& B,
-                        CBLAS_TRANSPOSE TranseA = CblasNoTrans,
-                        CBLAS_TRANSPOSE TranseB = CblasNoTrans,
-                        string out_neme="") {
+   Mat<double>& matmul(const Mat<double>& A, const Mat<double>& B,Mat<double>& C,
+                        CBLAS_TRANSPOSE TranseA = CblasNoTrans,CBLAS_TRANSPOSE TranseB = CblasNoTrans) {
         //転置後の行列を求める
         int Arows = (TranseA == CblasNoTrans) ? A.get_rows() : A.get_cols();
         int Acols = (TranseA == CblasNoTrans) ? A.get_cols() : A.get_rows();
         int Brows = (TranseB == CblasNoTrans) ? B.get_rows() : B.get_cols();
         int Bcols = (TranseB == CblasNoTrans) ? B.get_cols() : B.get_rows();
         
-        Mat<double> C(Arows,Bcols);
+        C.set_size(Arows,Bcols);
+        
         cblas_dgemm(CblasRowMajor, TranseA, TranseB,
             Arows, Bcols, Acols, 1.0, A.data(), A.get_cols(), B.data(), B.get_cols(), 0.0, C.data(), Bcols);
         
@@ -152,9 +152,9 @@ public:
     vector<double> forward(const vector<vector<double>>& x) {
         
         z1.copy_from_vector(x);
-        z2 = sigmoid(add_bias(matmul(z1, w2_mat), b2_mat),z2);
-        z3 = sigmoid(add_bias(matmul(z2, w3_mat), b3_mat),z3);
-        out= sigmoid(add_bias(matmul(z3, wout_mat), bout_mat),out);
+        z2 = sigmoid(add_bias(matmul(z1,w2_mat,z2), b2_mat),z2);
+        z3 = sigmoid(add_bias(matmul(z2,w3_mat,z3), b3_mat),z3);
+        out= sigmoid(add_bias(matmul(z3,wout_mat,out), bout_mat),out);
 
         vector<double> out_vec(out.size());
         for(int i=0;i<out.size();i++) {out_vec[i]=out[i];}
@@ -172,29 +172,29 @@ public:
             double sig_d = out[i] * (1 - out[i]);
             out_d[i] = 2 * (out[i] - t[i]) * sig_d;
         }
-        Mat<double> out_dw = matmul(z3 , out_d,CblasTrans  ,CblasNoTrans);
-        Mat<double> out_db = matmul(one, out_d,CblasTrans  ,CblasNoTrans);
+        out_dw = matmul(z3 , out_d, out_dw, CblasTrans  ,CblasNoTrans);
+        out_db = matmul(one, out_d, out_db, CblasTrans  ,CblasNoTrans);
         sum(out_dw,wout_mat,-lr);
         sum(out_db,bout_mat,-lr);
         
         ///
 		Mat<double> one2(z3.get_rows(),z3.get_cols());one2.set_data(1.0);
-        Mat<double> w3_d  = matmul(out_d , wout_mat,CblasNoTrans  ,CblasTrans,"w3_d");
+        w3_d = matmul(out_d , wout_mat,w3_d , CblasNoTrans  ,CblasTrans);
         for (size_t i = 0; i < w3_d.size(); i++) {
             w3_d[i] = w3_d[i] * (z3[i] * (1 - z3[i]));
         }
-        Mat<double> w3_dw = matmul(z3   , w3_d,CblasTrans ,CblasNoTrans,"w3_dw");
-        Mat<double> w3_db = matmul(one2 , w3_d,CblasTrans ,CblasNoTrans,"w3_dw");
+        w3_dw = matmul(z3 ,w3_d,w3_dw,CblasTrans ,CblasNoTrans);
+        w3_db = matmul(one2,w3_d,w3_db,CblasTrans ,CblasNoTrans);
         sum(w3_dw,w3_mat,-lr);
         sum(w3_db,b3_mat,-lr);
 
         ///
-        Mat<double> w2_d  = matmul(w3_d , w3_mat,CblasNoTrans  ,CblasTrans,"w2_d");
+        w2_d  = matmul(w3_d , w3_mat,w2_d,CblasNoTrans  ,CblasTrans);
         for (size_t i = 0; i < w2_d.size(); i++) {
             w2_d[i] = w2_d[i] * (z2[i] * (1 - z2[i]));
         }
-        Mat<double> w2_dw = matmul(z1   , w2_d,CblasTrans ,CblasNoTrans,"w2_dw");
-        Mat<double> w2_db = matmul(one  , w2_d,CblasTrans ,CblasNoTrans,"w2_db");
+        w2_dw = matmul(z1   , w2_d,w2_dw,CblasTrans ,CblasNoTrans);
+        w2_db = matmul(one  , w2_d,w2_db,CblasTrans ,CblasNoTrans);
         sum(w2_dw,w2_mat,-lr);
         sum(w2_db,b2_mat,-lr);
 
