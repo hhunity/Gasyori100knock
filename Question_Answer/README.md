@@ -99,7 +99,7 @@ pythonで書いたものをC++で書いて速度比較してみる
 | 92 | [K-meansによる減色処理 (Step.2) 減色処理](../Question_91_100) | [✓](question_91.py) | | 
 | 93 | [機械学習の学習データの用意 (Step.1) IoUの計算](../Question_91_100) | [✓](question_93.py) | |
 | 94 | [機械学習の学習データの用意 (Step.2) ランダムクラッピング](../Question_91_100) | [✓](question_93.py) | |
-| 95 | [ニューラルネットワーク (Step.1) ディープラーニングにする](../Question_91_100) | [✓](question_95.py) 0.06sec | Eigen版 [✓](question_95.cpp)　0.41sec <br> cblas版 [✓](question_95B.cpp) 0.036sec|
+| 95 | [ニューラルネットワーク (Step.1) ディープラーニングにする](../Question_91_100) | [✓](question_95.py) 0.06sec | Eigen版 [✓](question_95.cpp)0.41sec <br> cblas版 [✓](question_95B.cpp) 0.036sec|
 | 96 | [ニューラルネットワーク (Step.2) 学習](../Question_91_100) | [✓](question_96.py) | |
 | 97 | [簡単な物体検出 (Step.1) スライディングウィンドウ + HOG](../Question_91_100) | [✓](question_97.py) | |
 | 98 | [簡単な物体検出 (Step.2) スライディングウィンドウ + NN](../Question_91_100) | [✓](question_98.py) | |
