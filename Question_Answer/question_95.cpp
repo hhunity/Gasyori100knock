@@ -1,6 +1,7 @@
 #include <iostream>
 #include <vector>
 #include <random>
+#define EIGEN_USE_BLAS
 #include <Eigen/Dense>
 #include <cmath>
 #include <string>
