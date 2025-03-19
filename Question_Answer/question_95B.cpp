@@ -17,8 +17,9 @@ class Mat  {
     int rows;
     int cols;
     string name;
+    void _set_size(int in_rows,int in_cols){rows=in_rows,cols=in_cols;}
 public:
-    Mat(string name="") : name(name){}
+    Mat(string name="") : rows(0),cols(0),name(name){}
     Mat(int in_rows,int in_cols,string name="") : rows(in_rows),cols(in_cols),vec(in_rows*in_cols),name(name) {}
     Mat(Mat&& other) noexcept : rows(other.rows),cols(other.cols),vec(std::move(other.vec)),name(other.name) {}
     auto begin() { return vec.begin();}
@@ -34,16 +35,20 @@ public:
     t& operator[](int index) {return vec.at(index);}
     const t& operator[](int index) const {return vec.at(index);}
     
-    Mat& operator=(const Mat<t>&& other) {
+    Mat& operator=(const Mat<t>& other) {
         if( this != &other) {
-            rows = other.rows;
-            cols = other.cols;
-            vec  = std::move(other.vec);
+            _set_size(other.rows,other.cols);
+            vec = std::move(other.vec);
         }
         return *this;
     }
     void set_data(t data) { for ( auto &a : vec ) { a = data;}}
-    void set_size(int in_rows,int in_cols){rows = in_rows;cols = in_cols;vec.resize(size());}
+    void set_size(int in_rows,int in_cols){
+        if(in_rows!=rows or in_cols!=cols) {
+            _set_size(in_rows,in_cols);
+            vec.resize(size());
+        }
+    }
     void copy_from_vector(const vector<vector<t>>& other) {
         set_size(other.size(),other[0].size());
         for (int j=0;j<rows;j++) {
@@ -74,12 +79,15 @@ private:
     double lr;
     Mat<double> w2_mat, b2_mat, w3_mat, b3_mat, wout_mat, bout_mat;
     Mat<double> z1, z2, z3, out;
+    Mat<double> one,out_d,out_dw,out_db,one2,w3_d,w3_d2,w3_db;
 public:
     NN(int ind = 2, int w = 64, int w2 = 64, int outd = 1, double lr = 0.1)
         : lr(lr),
           w2_mat(ind,w,"w2"), b2_mat(1,w,"b2"),w3_mat(w,w2,"w3"), b3_mat(1,w2,"b3"),
           wout_mat(w2,outd,"wout"), bout_mat(outd,1,"bout"),
-          z1("z1"),z2("z2"),z3("z3") {
+          z1("z1"),z2("z2"),z3("z3"),one("one"),out_d("out_d"),
+          out_dw("out_dw"),out_db("out_db"),one2("one2"),w3_d("w3_d"),w3_d2("w3_d2"),w3_db("w3_db")
+          {
 
         mt19937 gen(0);
         normal_distribution<double> dist(0.0, 1.0);
@@ -132,24 +140,21 @@ public:
         cblas_daxpy(out.size(),alpha, mat1.data(), 1, out.data(), 1);
     }
 
-   void sigmoid(const Mat<double>& x,Mat<double> &out) {
-        
-        if(out.size()==0) {
-            out.set_size(x.get_rows(),x.get_cols());
-        }
-        
+    Mat<double>& sigmoid(const Mat<double>& x,Mat<double> &out) {
+        out.set_size(x.get_rows(),x.get_cols());
         for (size_t i = 0; i < x.size(); i++) {
             out[i] = 1.0 / (1.0 + exp(-x[i]));
         }
-        return;
-    }
 
+        return out;
+    }
+    
     vector<double> forward(const vector<vector<double>>& x) {
         
         z1.copy_from_vector(x);
-        sigmoid(add_bias(matmul(z1, w2_mat), b2_mat),z2);
-        sigmoid(add_bias(matmul(z2, w3_mat), b3_mat),z3);
-        sigmoid(add_bias(matmul(z3, wout_mat), bout_mat),out);
+        z2 = sigmoid(add_bias(matmul(z1, w2_mat), b2_mat),z2);
+        z3 = sigmoid(add_bias(matmul(z2, w3_mat), b3_mat),z3);
+        out= sigmoid(add_bias(matmul(z3, wout_mat), bout_mat),out);
 
         vector<double> out_vec(out.size());
         for(int i=0;i<out.size();i++) {out_vec[i]=out[i];}
@@ -160,8 +165,8 @@ public:
         int data_n= t.size();
         
         ///
-        Mat<double> one(data_n,1,"one");one.set_data(1.0);
-        Mat<double> out_d(out.get_rows(),out.get_cols(),"out_d");
+        one.set_size(data_n,1);one.set_data(1.0);
+        out_d.set_size(out.get_rows(),out.get_cols());
         
         for (size_t i = 0; i < out_d.size(); i++) {
             double sig_d = out[i] * (1 - out[i]);
