@@ -1,4 +1,5 @@
 import numpy as np
+import time
 
 np.random.seed(0)
 
@@ -49,6 +50,8 @@ class NN:
     def sigmoid(self, x):
         return 1. / (1. + np.exp(-x))
 
+start_time = time.time()
+
 train_x = np.array([[0,0], [0,1], [1,0], [1,1]], dtype=np.float32)
 train_t = np.array([[0], [1], [1], [0]], dtype=np.float32)
 
@@ -64,3 +67,7 @@ for j in range(4):
     x = train_x[j]
     t = train_t[j]
     print("in:", x, "pred:", nn.forward(x))
+
+end_time = time.time()
+elapsed_time = end_time - start_time
+print(f"処理時間: {elapsed_time} 秒")

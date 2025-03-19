@@ -5,39 +5,46 @@
 #include <cmath>
 #include <string>
 
+using namespace std;
+
 using Mat = Eigen::MatrixXd;
+
+void dump(Mat mat) {
+		cout << mat << endl; 
+		cout << mat.rows() << "x" << mat.cols() ;
+}
 
 class NN {
 	Mat w2,b2,w3,b3,wout,bout;
 	Mat z1,z2,z3,out;
 	double lr;
 private:
-	void set_all(Mat &a,std::function<double()> func) {
+	void set_all(Mat &a,function<double()> func) {
 		for(int y=0;y<a.rows();y++) {
 			for(int x=0;x<a.cols();x++) {
 				a(y,x) = func();
 			}
 		}
-	};
+	}
 	void dump_all(const Mat&a) {
-		std::cout << "#dump_all#" << std::endl;
-		std::cout << a << std::endl;
-	};
-	void dump_col_row(const Mat &a,std::string str) {
-		std::cout << str << ":"<< a.rows() << "x" << a.cols() << std::endl; 
-	};
+		cout << "#dump_all#" << endl;
+		cout << a << endl;
+	}
+	void dump_col_row(const Mat &a,string str) {
+		cout << str << ":"<< a.rows() << "x" << a.cols() << endl; 
+	}
 	void dump_col_row(const Mat &a) {
-		std::cout << a.rows() << "x" << a.cols() << std::endl; 
-	};
+		cout << a.rows() << "x" << a.cols() << endl; 
+	}
 	Mat sigmoid(const Mat& x) {
 		return 1.0 / (1.0 + (-x.array()).exp());
-	};
+	}
 public:
 	NN(int ind=2,int iw=64,int iw2=64,int outd=1,double lr=0.1) :
 		w2{ind,iw},b2{1,iw},w3{iw,iw2},b3{1,iw2},wout{iw2,outd},bout{outd,1},lr(lr)
 	{
-		std::mt19937 gen(0);
-		std::normal_distribution<> dist(0.0,1.0);
+		mt19937 gen(0);
+		normal_distribution<> dist(0.0,1.0);
 		
 		set_all(w2,[&dist,&gen](){return dist(gen);});
 		set_all(b2,[&dist,&gen](){return dist(gen);});
@@ -45,7 +52,7 @@ public:
 		set_all(b3,[&dist,&gen](){return dist(gen);});
 		set_all(wout,[&dist,&gen](){return dist(gen);});
 		set_all(bout,[&dist,&gen](){return dist(gen);});
-	};
+	}
 	Mat forward(const Mat &x) {
 
 		int num = x.rows();
@@ -55,7 +62,7 @@ public:
 		out= sigmoid(((z3*wout)+bout.replicate(num,1)));
 
 		return out;
-	};
+	}
 	void train(Mat &t) {
 		int num = t.rows();
 		Mat one(num,1);
@@ -86,12 +93,9 @@ public:
 		b2.array() -= (lr * w2_db.array());
 
 		if (out_d.hasNaN() || out_dw.hasNaN() || out_db.hasNaN()) {
-			std::cerr << "NaN detected in gradient calculation!" << std::endl;
+			cerr << "NaN detected in gradient calculation!" << endl;
 		}
-	};
-	void show(){
-		dump_all(b2);
-	};
+	}
 };
 
 double get_correct_coutn(Mat &out,Mat &train_y){
@@ -109,7 +113,7 @@ double get_correct_coutn(Mat &out,Mat &train_y){
 }
 
 int main() {
-	auto start = std::chrono::high_resolution_clock::now();
+	auto start = chrono::high_resolution_clock::now();
 
 	Mat train_x(4,2);
 	Mat train_y(4,1);
@@ -124,16 +128,16 @@ int main() {
 	for( int i =0;i <1000;i++) {
 		Mat out = nn.forward(train_x);
 		nn.train(train_y);
-		// std::cout << (double)get_correct_coutn(out,train_y)/4 << std::endl;
+		// cout << (double)get_correct_coutn(out,train_y)/4 << endl;
 	};
 
 	for(int i=0;i<4;i++)	{
 		Mat x = train_x.row(i);
 		Mat out = nn.forward(x);
-		std :: cout << "in:" << x << "pred:" << out << std::endl;
+		std :: cout << "in:" << x << "pred:" << out << endl;
 	}
 
-  auto end = std::chrono::high_resolution_clock::now();
-  std::chrono::duration<double, std::milli> duration = end - start;
-	std::cout << "time:" << duration.count()/1000 <<  std::endl;
+  auto end = chrono::high_resolution_clock::now();
+  chrono::duration<double, milli> duration = end - start;
+	cout << "time:" << duration.count()/1000 <<  endl;
 }
