@@ -96,7 +96,7 @@ pythonで書いたものをC++で書いて速度比較してみる
 | 89 | [K-means (Step.2) クラスタリング](../Question_81_90) | [✓](question_89.py) | |  
 | 90 | [K-means (Step.3) 初期ラベルの変更](../Question_81_90) | [✓](question_90.py) ||  
 | 91 | [K-meansによる減色処理 (Step.1) 色の距離によるクラス分類](../Question_91_100) | [✓](question_91.py) |[✓](question_91.cpp) | 
-| 92 | [K-meansによる減色処理 (Step.2) 減色処理](../Question_91_100) | [✓](question_91.py) | | 
+| 92 | [K-meansによる減色処理 (Step.2) 減色処理](../Question_91_100) | [✓](question_91.py) | [✓](question_92.cpp) 0.011sec| 
 | 93 | [機械学習の学習データの用意 (Step.1) IoUの計算](../Question_91_100) | [✓](question_93.py) | |
 | 94 | [機械学習の学習データの用意 (Step.2) ランダムクラッピング](../Question_91_100) | [✓](question_93.py) | |
 | 95 | [ニューラルネットワーク (Step.1) ディープラーニングにする](../Question_91_100) | [✓](question_95.py) 0.06sec | Eigen版 [✓](question_95.cpp)0.41sec <br> cblas版 [✓](question_95B.cpp) 0.036sec <br> cblas版+スマートポインタ [✓](question_95B.cpp) 0.029sec  |
