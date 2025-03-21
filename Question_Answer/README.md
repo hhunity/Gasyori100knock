@@ -98,7 +98,7 @@ pythonで書いたものをC++で書いて速度比較してみる
 | 91 | [K-meansによる減色処理 (Step.1) 色の距離によるクラス分類](../Question_91_100) | [✓](question_91.py) |[✓](question_91.cpp) | 
 | 92 | [K-meansによる減色処理 (Step.2) 減色処理](../Question_91_100) | [✓](question_91.py) 10.7sec | [✓](question_92.cpp) 0.011sec| 
 | 93 | [機械学習の学習データの用意 (Step.1) IoUの計算](../Question_91_100) | [✓](question_93.py) |[✓](question_93.cpp)|
-| 94 | [機械学習の学習データの用意 (Step.2) ランダムクラッピング](../Question_91_100) | [✓](question_93.py) | |
+| 94 | [機械学習の学習データの用意 (Step.2) ランダムクラッピング](../Question_91_100) | [✓](question_93.py) | [✓](question_94.cpp)|
 | 95 | [ニューラルネットワーク (Step.1) ディープラーニングにする](../Question_91_100) | [✓](question_95.py) 0.06sec | Eigen版 [✓](question_95.cpp)0.41sec <br> cblas版 [✓](question_95B.cpp) 0.036sec <br> cblas版+スマートポインタ [✓](question_95B.cpp) 0.029sec  |
 | 96 | [ニューラルネットワーク (Step.2) 学習](../Question_91_100) | [✓](question_96.py) | |
 | 97 | [簡単な物体検出 (Step.1) スライディングウィンドウ + HOG](../Question_91_100) | [✓](question_97.py) | |
