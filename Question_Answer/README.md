@@ -70,7 +70,7 @@ pythonで書いたものをC++で書いて速度比較してみる
 | 63 | [細線化](../Question_61_70) | [✓](question_63.py) | | 
 | 64 | [ヒルディッチの細線化](../Question_61_70) | [✓](question_64.py)|  | 
 | 65 | [Zhang-Suenの細線化](../Question_61_70) | [✓](question_65.py) | | 
-| 61 | [4-連結数](../Question_61_70) | [✓](question_61.py) | |
+| 66 | [HOG (Step.1) 勾配強度・勾配角度](../Question_61_70) | [✓](question_66.py) |[✓](question_91.cpp)  |
 | 67 | [HOG (Step.2) 勾配ヒストグラム](../Question_61_70) | [✓](question_67.py) | | 
 | 68 | [HOG (Step.3) ヒストグラム正規化](../Question_61_70) | [✓](question_67.py) | | 
 | 69 | [HOG (Step.4) 特徴量の描画](../Question_61_70) | [✓](question_67.py) | | 
