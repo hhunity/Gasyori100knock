@@ -1,0 +1,71 @@
+#include <opencv2/opencv.hpp>
+#include <future>
+#include <iostream>
+#include <vector>
+
+// --- ずれ量を計算する関数（1つのROIに対して） ---
+cv::Point2d compute_shift(const cv::Mat& ref, const cv::Mat& curr, const cv::Rect& roi) {
+    cv::Mat ref_roi = ref(roi);
+    cv::Mat curr_roi = curr(roi);
+
+    cv::Mat ref_f, curr_f;
+    ref_roi.convertTo(ref_f, CV_32F);
+    curr_roi.convertTo(curr_f, CV_32F);
+
+    cv::Mat hann;
+    return cv::phaseCorrelate(ref_f, curr_f, hann);
+}
+
+// --- 画像をrows x colsのグリッドに分割する ---
+std::vector<cv::Rect> split_roi(const cv::Size& size, int rows, int cols) {
+    std::vector<cv::Rect> rois;
+    int w = size.width / cols;
+    int h = size.height / rows;
+    for (int y = 0; y < rows; ++y)
+        for (int x = 0; x < cols; ++x)
+            rois.emplace_back(x * w, y * h, w, h);
+    return rois;
+}
+
+int main() {
+    cv::VideoCapture cap(0); // カメラ入力
+    if (!cap.isOpened()) {
+        std::cerr << "Failed to open camera.\n";
+        return -1;
+    }
+
+    cv::Mat prev_frame, curr_frame;
+    cap >> prev_frame;
+    if (prev_frame.empty()) return -1;
+    cv::cvtColor(prev_frame, prev_frame, cv::COLOR_BGR2GRAY);
+
+    while (true) {
+        cap >> curr_frame;
+        if (curr_frame.empty()) break;
+        cv::cvtColor(curr_frame, curr_frame, cv::COLOR_BGR2GRAY);
+
+        // ROIを2x2に分割（必要なら 3x3 などに変更可能）
+        auto rois = split_roi(curr_frame.size(), 2, 2);
+
+        // すべてのROIに対して非同期にphaseCorrelate処理を投げる
+        std::vector<std::future<cv::Point2d>> futures;
+        for (const auto& roi : rois) {
+            futures.emplace_back(std::async(std::launch::async, compute_shift,
+                                            prev_frame.clone(), curr_frame.clone(), roi));
+        }
+
+        // 結果をまとめて取得
+        int idx = 0;
+        for (auto& f : futures) {
+            cv::Point2d shift = f.get();
+            std::cout << "ROI " << idx++ << ": dx=" << shift.x << ", dy=" << shift.y << std::endl;
+        }
+
+        prev_frame = curr_frame.clone();
+
+        cv::imshow("Live", curr_frame);
+        if (cv::waitKey(1) == 27) break; // ESCで終了
+    }
+
+    return 0;
+}
