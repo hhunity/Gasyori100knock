@@ -187,3 +187,27 @@ plt.grid(True)
 plt.legend()
 plt.tight_layout()
 plt.show()
+
+
+
+from tqdm import tqdm  # プログレスバー用
+
+# --- 結果格納用辞書 ---
+shift_dict = {name: [] for name in algorithms}
+
+# --- tqdmで画像ペアのループをラップ ---
+for idx, (imgA_path, imgB_path) in enumerate(tqdm(image_pairs, desc="Processing image pairs")):
+    imgA = cv2.imread(imgA_path, cv2.IMREAD_GRAYSCALE)
+    imgB = cv2.imread(imgB_path, cv2.IMREAD_GRAYSCALE)
+    if imgA is None or imgB is None:
+        print(f"読み込みエラー: {imgA_path}, {imgB_path}")
+        continue
+
+    for name, func in algorithms.items():
+        try:
+            shift = func(imgA, imgB)
+        except Exception as e:
+            shift = None
+            print(f"{name} エラー: {e}")
+        shift_dict[name].append(np.nan if shift is None else shift)
+
