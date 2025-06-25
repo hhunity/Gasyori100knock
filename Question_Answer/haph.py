@@ -107,3 +107,83 @@ plt.legend()
 plt.tight_layout()
 plt.show()
 
+
+import cv2
+import numpy as np
+import matplotlib.pyplot as plt
+import pandas as pd
+
+# --- 移動平均関数 ---
+def moving_average(data, window_size=5):
+    return pd.Series(data).rolling(window=window_size, center=True).mean().to_numpy()
+
+# --- 各アルゴリズム関数（以前の定義をそのまま使えます） ---
+def shift_by_phase_correlation(img1, img2):
+    win = cv2.createHanningWindow(img1.shape[::-1], cv2.CV_64F)
+    shift, _ = cv2.phaseCorrelate(img1 * win, img2 * win)
+    return shift[1]
+
+def shift_by_template_matching(img1, img2):
+    template = img1[0:100, :]
+    res = cv2.matchTemplate(img2, template, cv2.TM_CCOEFF_NORMED)
+    _, _, _, max_loc = cv2.minMaxLoc(res)
+    return max_loc[1]
+
+def shift_by_hough_circle_center(img1, img2):
+    def get_center_y(img):
+        blurred = cv2.medianBlur(img, 5)
+        circles = cv2.HoughCircles(blurred, cv2.HOUGH_GRADIENT, 1.2, 30,
+                                   param1=100, param2=30, minRadius=20, maxRadius=100)
+        if circles is None:
+            return None
+        circles = np.uint16(np.around(circles))
+        return np.mean(circles[0, :, 1])
+    y1 = get_center_y(img1)
+    y2 = get_center_y(img2)
+    return y2 - y1 if y1 is not None and y2 is not None else None
+
+# --- アルゴリズム辞書を定義 ---
+algorithms = {
+    "Phase Correlation": shift_by_phase_correlation,
+    "Template Matching": shift_by_template_matching,
+    "Hough Circles": shift_by_hough_circle_center
+}
+
+# --- 入力画像ペアのリスト ---
+image_pairs = [("img1.png", "img2.png"), ("img2.png", "img3.png"), ("img3.png", "img4.png")]
+
+# --- 結果格納用の辞書（アルゴ名 → シフト値リスト） ---
+shift_dict = {name: [] for name in algorithms}
+
+# --- 各アルゴでずれ量を計算して辞書に格納 ---
+for imgA_path, imgB_path in image_pairs:
+    imgA = cv2.imread(imgA_path, cv2.IMREAD_GRAYSCALE)
+    imgB = cv2.imread(imgB_path, cv2.IMREAD_GRAYSCALE)
+    if imgA is None or imgB is None:
+        print(f"読み込みエラー: {imgA_path}, {imgB_path}")
+        continue
+
+    for name, func in algorithms.items():
+        try:
+            shift = func(imgA, imgB)
+        except Exception as e:
+            shift = None
+            print(f"{name} でエラー: {e}")
+        shift_dict[name].append(np.nan if shift is None else shift)
+
+# --- グラフ描画（移動平均含む） ---
+x = list(range(len(image_pairs)))
+plt.figure(figsize=(12, 6))
+
+for name, values in shift_dict.items():
+    ma = moving_average(values, window_size=5)
+    plt.plot(x, values, linestyle='--', marker='o', alpha=0.4, label=f"{name}")
+    plt.plot(x, ma, linewidth=2, label=f"{name} (MA)")
+
+plt.title("Vertical Shift by Algorithm with Moving Average")
+plt.xlabel("Image Pair Index")
+plt.ylabel("Vertical Shift (pixels)")
+plt.grid(True)
+plt.legend()
+plt.tight_layout()
+plt.show()
