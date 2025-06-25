@@ -41,3 +41,69 @@ cv2.imshow("Hough Circles", output)
 
 cv2.waitKey(0)
 cv2.destroyAllWindows()
+
+import cv2
+import numpy as np
+import matplotlib.pyplot as plt
+import pandas as pd  # 移動平均のために使用
+
+# --- 移動平均関数 ---
+def moving_average(data, window_size=5):
+    return pd.Series(data).rolling(window=window_size, center=True).mean().to_numpy()
+
+# --- アルゴリズム定義（省略: 前回と同じ） ---
+# shift_by_phase_correlation
+# shift_by_template_matching
+# shift_by_hough_circle_center
+
+# --- 比較用画像ペア ---
+image_pairs = [("img1.png", "img2.png"), ("img2.png", "img3.png"), ("img3.png", "img4.png")]
+# もっと多くてももちろんOK
+
+shift_phase = []
+shift_template = []
+shift_hough = []
+
+for imgA_path, imgB_path in image_pairs:
+    imgA = cv2.imread(imgA_path, cv2.IMREAD_GRAYSCALE)
+    imgB = cv2.imread(imgB_path, cv2.IMREAD_GRAYSCALE)
+    if imgA is None or imgB is None:
+        print(f"読み込みエラー: {imgA_path}, {imgB_path}")
+        continue
+    shift_phase.append(shift_by_phase_correlation(imgA, imgB))
+    shift_template.append(shift_by_template_matching(imgA, imgB))
+    shift_hough.append(shift_by_hough_circle_center(imgA, imgB))
+
+# --- NaN補完（HoughなどでNoneが出たとき） ---
+shift_phase = [np.nan if v is None else v for v in shift_phase]
+shift_template = [np.nan if v is None else v for v in shift_template]
+shift_hough = [np.nan if v is None else v for v in shift_hough]
+
+# --- 移動平均の計算 ---
+ma_phase = moving_average(shift_phase, window_size=5)
+ma_template = moving_average(shift_template, window_size=5)
+ma_hough = moving_average(shift_hough, window_size=5)
+
+# --- グラフ表示 ---
+x = list(range(len(shift_phase)))
+
+plt.figure(figsize=(12, 6))
+
+# オリジナルデータ（点線）
+plt.plot(x, shift_phase, 'o--', label='Phase Corr.', alpha=0.4)
+plt.plot(x, shift_template, 's--', label='Template Match', alpha=0.4)
+plt.plot(x, shift_hough, '^--', label='Hough Center', alpha=0.4)
+
+# 移動平均（実線）
+plt.plot(x, ma_phase, '-', label='Phase Corr. (MA)', linewidth=2)
+plt.plot(x, ma_template, '-', label='Template Match (MA)', linewidth=2)
+plt.plot(x, ma_hough, '-', label='Hough Center (MA)', linewidth=2)
+
+plt.title("Vertical Shift with Moving Averages")
+plt.xlabel("Image Pair Index")
+plt.ylabel("Vertical Shift (pixels)")
+plt.grid(True)
+plt.legend()
+plt.tight_layout()
+plt.show()
+
