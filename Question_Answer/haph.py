@@ -211,3 +211,87 @@ for idx, (imgA_path, imgB_path) in enumerate(tqdm(image_pairs, desc="Processing 
             print(f"{name} エラー: {e}")
         shift_dict[name].append(np.nan if shift is None else shift)
 
+
+
+import cv2
+import numpy as np
+import matplotlib.pyplot as plt
+import pandas as pd
+import os
+import math
+from tqdm import tqdm
+
+# --- アルゴリズム関数（省略） ---
+# shift_by_phase_correlation, shift_by_template_matching, shift_by_hough_circle_center
+
+# --- 移動平均関数 ---
+def moving_average(data, window_size=5):
+    return pd.Series(data).rolling(window=window_size, center=True).mean().to_numpy()
+
+# --- アルゴリズム辞書 ---
+algorithms = {
+    "Phase Corr": shift_by_phase_correlation,
+    "Template": shift_by_template_matching,
+    "Hough": shift_by_hough_circle_center
+}
+
+# --- 基準画像 ---
+base_img = cv2.imread("base.png", cv2.IMREAD_GRAYSCALE)
+
+# --- 比較画像群 ---
+shifted_images_dir = "shifted"
+image_files = sorted([f for f in os.listdir(shifted_images_dir) if f.endswith(".png")])
+
+# --- 縦ずれ範囲 ---
+shift_offsets = list(range(-20, 21))
+
+# --- グラフレイアウト（例：2x2など） ---
+num_images = len(image_files)
+cols = 2
+rows = math.ceil(num_images / cols)
+
+# --- サブプロット作成 ---
+fig, axs = plt.subplots(rows, cols, figsize=(cols * 6, rows * 4), squeeze=False)
+axs = axs.flatten()
+
+for idx, img_file in enumerate(tqdm(image_files, desc="Plotting each image")):
+    img_path = os.path.join(shifted_images_dir, img_file)
+    compare_img = cv2.imread(img_path, cv2.IMREAD_GRAYSCALE)
+    if compare_img is None or base_img is None:
+        print(f"読み込みエラー: {img_file}")
+        continue
+
+    shift_results = {name: [] for name in algorithms}
+
+    for dy in shift_offsets:
+        h, w = compare_img.shape
+        M = np.float32([[1, 0, 0], [0, 1, dy]])
+        shifted = cv2.warpAffine(compare_img, M, (w, h), borderMode=cv2.BORDER_REFLECT)
+
+        for name, func in algorithms.items():
+            try:
+                shift = func(base_img, shifted)
+            except:
+                shift = np.nan
+            shift_results[name].append(shift)
+
+    # === サブプロットに描画 ===
+    ax = axs[idx]
+    for name, values in shift_results.items():
+        ma = moving_average(values, window_size=3)
+        ax.plot(shift_offsets, values, '--o', alpha=0.3, label=name)
+        ax.plot(shift_offsets, ma, linewidth=2, label=f"{name} (MA)")
+
+    ax.set_title(f"{img_file}")
+    ax.set_xlabel("Artificial Vertical Offset (px)")
+    ax.set_ylabel("Detected Shift")
+    ax.grid(True)
+    ax.legend()
+
+# 空きプロットを非表示にする
+for j in range(idx + 1, len(axs)):
+    fig.delaxes(axs[j])
+
+plt.tight_layout()
+plt.show()
+
