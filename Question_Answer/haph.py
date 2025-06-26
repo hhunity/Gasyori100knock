@@ -295,3 +295,32 @@ for j in range(idx + 1, len(axs)):
 plt.tight_layout()
 plt.show()
 
+
+import cv2
+import numpy as np
+
+# 入力画像読み込み
+img = cv2.imread('input.jpg')  # 512x512想定
+H, W = img.shape[:2]
+
+win_w = 128
+n_patches = 8
+stride = (W - win_w) / (n_patches - 1)  # = 54.85714...
+
+patches = []
+
+for i in range(n_patches):
+    x_start = round(i * stride)
+    x_end = x_start + win_w
+
+    # 最後のパッチだけ強制的に右端で終わらせる
+    if x_end > W:
+        x_end = W
+        x_start = W - win_w  # 調整して幅128を保つ
+
+    patch = img[:, x_start:x_end]
+    patches.append(patch)
+
+    # 保存（任意）
+    cv2.imwrite(f'patch_{i}.jpg', patch)
+
