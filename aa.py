@@ -1,3 +1,19 @@
+
+def detect_angle_via_minarearect(img):
+    gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY) if img.ndim == 3 else img
+    edges = cv2.Canny(gray, 50, 150)
+    contours, _ = cv2.findContours(edges, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    if not contours:
+        return None
+
+    largest = max(contours, key=cv2.contourArea)
+    rect = cv2.minAreaRect(largest)
+    angle = rect[2]
+    if rect[1][0] < rect[1][1]:
+        angle += 90
+    return angle
+
+
 def auto_canny(img, sigma=0.33):
     v = np.median(img)
     lower = int(max(0, (1.0 - sigma) * v))
