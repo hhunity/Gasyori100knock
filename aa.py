@@ -1,4 +1,40 @@
 
+def sweep_rotation(img, ref_img, angle_range=(-5, 5), step=0.1):
+    def rotate(img, angle):
+        h, w = img.shape
+        M = cv2.getRotationMatrix2D((w/2, h/2), angle, 1.0)
+        return cv2.warpAffine(img, M, (w, h))
+
+    best_angle = 0
+    best_score = -np.inf
+
+    for angle in np.arange(angle_range[0], angle_range[1] + step, step):
+        rotated = rotate(img, angle)
+        shift, score = cv2.phaseCorrelate(np.float32(ref_img), np.float32(rotated))
+        if score > best_score:
+            best_score = score
+            best_angle = angle
+
+    return best_angle
+
+def logpolar_phase_rotation(img1, img2):
+    def fft_magnitude(img):
+        f = np.fft.fft2(img)
+        fshift = np.fft.fftshift(f)
+        magnitude = np.abs(fshift)
+        return magnitude
+
+    mag1 = fft_magnitude(img1)
+    mag2 = fft_magnitude(img2)
+
+    center = (img1.shape[1]//2, img1.shape[0]//2)
+    logpolar1 = cv2.logPolar(mag1, center, 40, cv2.INTER_LINEAR + cv2.WARP_FILL_OUTLIERS)
+    logpolar2 = cv2.logPolar(mag2, center, 40, cv2.INTER_LINEAR + cv2.WARP_FILL_OUTLIERS)
+
+    shift, response = cv2.phaseCorrelate(np.float32(logpolar1), np.float32(logpolar2))
+    angle = 360.0 * shift[1] / logpolar1.shape[0]  # y方向のずれが回転
+    return angle % 360
+
 def detect_angle_via_minarearect(img):
     gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY) if img.ndim == 3 else img
     edges = cv2.Canny(gray, 50, 150)
