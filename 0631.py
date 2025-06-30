@@ -1,3 +1,33 @@
+
+✅ 前提（一般化）
+
+紙の高さを h、
+固定点（支点）の位置を 0〜1の相対値（上=0、下=1、中=0.5）で表すとします：
+	•	anchor = 0.0 → 上端固定
+	•	anchor = 1.0 → 下端固定
+	•	anchor = 0.5 → 中央固定
+
+⸻
+
+✅ 回転後のずれ（Δx, Δy）の計算式
+
+\begin{align*}
+L_{\text{top}} &= -h \cdot \text{anchor} \\
+L_{\text{bottom}} &= h \cdot (1 - \text{anchor})
+\end{align*}
+
+それぞれが、支点から上端／下端までの距離です。
+
+回転角度を a（ラジアン）としたとき：
+
+\begin{align*}
+\Delta x_{\text{top}} &= L_{\text{top}} \cdot \sin(a) \\
+\Delta y_{\text{top}} &= L_{\text{top}} \cdot (1 - \cos(a)) \\
+\Delta x_{\text{bottom}} &= L_{\text{bottom}} \cdot \sin(a) \\
+\Delta y_{\text{bottom}} &= L_{\text{bottom}} \cdot (1 - \cos(a))
+\end{align*}
+
+
 解法：回転後の位置から差分を求める
 
 数学的に：
