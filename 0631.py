@@ -1,3 +1,51 @@
+解法：回転後の位置から差分を求める
+
+数学的に：
+
+\text{Q}{\text{rot}} = R\theta \cdot (Q - P) + P
+
+つまり：
+	1.	点Qを 支点P中心にずらす（Q - P）
+	2.	回転行列で回す
+	3.	元の位置Pに戻す
+
+⸻
+
+✅ 実装：座標ベースの支点を指定して、任意点の回転差分を求める
+
+
+import numpy as np
+
+def rotate_point_around_center(Q, P, angle_deg):
+    """
+    Q: 回転させたい点（x, y）
+    P: 回転の支点（x, y）
+    angle_deg: 回転角（度）
+    """
+    angle_rad = np.deg2rad(angle_deg)
+    xq, yq = Q
+    xp, yp = P
+
+    # 支点を原点に移動して回転
+    x_shifted = xq - xp
+    y_shifted = yq - yp
+
+    x_rot =  x_shifted * np.cos(angle_rad) - y_shifted * np.sin(angle_rad)
+    y_rot =  x_shifted * np.sin(angle_rad) + y_shifted * np.cos(angle_rad)
+
+    # 元の位置に戻す
+    x_new = x_rot + xp
+    y_new = y_rot + yp
+
+    dx = x_new - xq
+    dy = y_new - yq
+
+    return dx, dy  # ずれ量（Δx, Δy）
+
+
+
+
+
 def bandpass_filter_fft(img, low=10, high=100):
     f = np.fft.fft2(img)
     fshift = np.fft.fftshift(f)
