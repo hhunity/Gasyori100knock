@@ -1,4 +1,63 @@
 
+import numpy as np
+from scipy.ndimage import maximum_filter
+
+def find_peak_candidates(
+    corr,
+    threshold=0.2,
+    min_distance=3,
+    top_k=None,
+    sort_by="response"
+):
+    """
+    相関マップからピーク候補を抽出
+
+    Parameters:
+        corr: np.ndarray 相関マップ（float32）
+        threshold: float ピーク強度のしきい値（0～1）
+        min_distance: int 最小距離（近接ピークを除外）
+        top_k: int or None 上位k個に制限（Noneなら制限なし）
+        sort_by: str 'response' または 'distance_to_center'
+
+    Returns:
+        List of (y, x) tuples
+    """
+
+    h, w = corr.shape
+    center_y, center_x = h // 2, w // 2
+
+    # 局所最大検出
+    local_max = (corr == maximum_filter(corr, size=3))
+    threshold_mask = (corr > threshold)
+    peak_mask = local_max & threshold_mask
+
+    candidates = np.argwhere(peak_mask)
+    if candidates.size == 0:
+        return []
+
+    # スコア計算
+    scored = []
+    for y, x in candidates:
+        val = corr[y, x]
+        dist_to_center = np.hypot(x - center_x, y - center_y)
+        scored.append((val, dist_to_center, y, x))
+
+    # 並べ替え
+    if sort_by == "response":
+        scored.sort(key=lambda t: -t[0])  # 相関値降順
+    elif sort_by == "distance_to_center":
+        scored.sort(key=lambda t: t[1])   # 中心に近い順
+
+    # 最小距離フィルタ
+    selected = []
+    for _, _, y, x in scored:
+        if all(np.hypot(x - px, y - py) >= min_distance for py, px in selected):
+            selected.append((y, x))
+        if top_k and len(selected) >= top_k:
+            break
+
+    return selected
+
 ##上下・左右対称のピークをペアで除外
 def filter_symmetric_peaks(peaks, corr, tolerance=5):
     h, w = corr.shape
