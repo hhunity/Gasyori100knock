@@ -1,3 +1,43 @@
+def subpixel_peak_2d(corr):
+    _, _, max_loc, _ = cv2.minMaxLoc(corr)
+    x0, y0 = max_loc
+
+    if not (1 <= x0 < corr.shape[1] - 1 and 1 <= y0 < corr.shape[0] - 1):
+        return (float(x0), float(y0))  # 周囲が取れない場合は整数返す
+
+    # 3x3 近傍を取り出す
+    patch = corr[y0-1:y0+2, x0-1:x0+2]
+
+    # フィッティングのための座標と値
+    dx = np.array([-1, 0, 1])
+    dy = np.array([-1, 0, 1])
+    X, Y = np.meshgrid(dx, dy)
+    Z = patch.flatten()
+
+    A = np.stack([
+        np.ones_like(X).flatten(),
+        X.flatten(),
+        Y.flatten(),
+        X.flatten()**2,
+        X.flatten()*Y.flatten(),
+        Y.flatten()**2
+    ], axis=1)
+
+    # 最小二乗で係数を求める
+    coeffs, _, _, _ = np.linalg.lstsq(A, Z, rcond=None)
+
+    # 2次関数の極値（頂点）を求める
+    a, b, c, d, e, f = coeffs
+    denom = 4*d*f - e**2
+    if denom == 0:
+        return (float(x0), float(y0))
+
+    x_peak = (e*c - 2*f*b) / denom
+    y_peak = (e*b - 2*d*c) / denom
+
+    return (x0 + x_peak, y0 + y_peak)
+
+
 
 import numpy as np
 
