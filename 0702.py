@@ -1,3 +1,29 @@
+def mask_corr_near_shift(corr, prev_shift, max_distance=10):
+    """
+    corr の中で、prev_shift から max_distance 以内の部分だけ残す
+
+    Parameters:
+        corr: np.ndarray
+        prev_shift: tuple of float (dx, dy)
+        max_distance: float, 距離しきい値（ピクセル）
+
+    Returns:
+        masked_corr: np.ndarray（同サイズ、マスク以外ゼロ）
+    """
+    h, w = corr.shape
+    dx, dy = prev_shift
+    # wrap-around を考慮して、位置を整数でマッピング
+    cx = int(round((dx + w) % w))
+    cy = int(round((dy + h) % h))
+
+    Y, X = np.ogrid[:h, :w]
+    dist = np.hypot(X - cx, Y - cy)
+
+    mask = dist <= max_distance
+    masked_corr = np.zeros_like(corr)
+    masked_corr[mask] = corr[mask]
+    return masked_corr
+
 
 import numpy as np
 from scipy.ndimage import maximum_filter
