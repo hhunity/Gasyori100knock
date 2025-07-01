@@ -1,4 +1,153 @@
 
+import numpy as np
+
+def apply_bandpass_filter(dft, low=10, high=100):
+    h, w = dft.shape[:2]
+    cy, cx = h // 2, w // 2
+    y, x = np.ogrid[:h, :w]
+    dist = np.sqrt((y - cy)**2 + (x - cx)**2)
+
+    mask = np.logical_and(dist > low, dist < high).astype(np.float32)
+    mask = np.repeat(mask[:, :, np.newaxis], 2, axis=2)  # 2ch (real, imag)
+
+    return dft * mask
+
+import cv2
+
+# グレースケール画像
+img1_f = img1.astype(np.float32)
+img2_f = img2.astype(np.float32)
+
+# ハニング窓でエッジを抑制（任意）
+win = cv2.createHanningWindow(img1.shape[::-1], cv2.CV_32F)
+img1_f *= win
+img2_f *= win
+
+# FFT（2ch: real + imag）
+dft1 = cv2.dft(img1_f, flags=cv2.DFT_COMPLEX_OUTPUT)
+dft2 = cv2.dft(img2_f, flags=cv2.DFT_COMPLEX_OUTPUT)
+
+# バンドパスフィルタ適用
+dft1_filt = apply_bandpass_filter(dft1, low=10, high=120)
+dft2_filt = apply_bandpass_filter(dft2, low=10, high=120)
+
+# クロスパワースペクトルの正規化
+num = cv2.mulSpectrums(dft1_filt, dft2_filt, flags=0, conjB=True)
+mag = cv2.magnitude(num[..., 0], num[..., 1])
+mag[mag == 0] = 1e-6  # divide by zero防止
+num[..., 0] /= mag
+num[..., 1] /= mag
+
+# 逆FFT → 相関マップ
+corr = cv2.idft(num, flags=cv2.DFT_SCALE | cv2.DFT_REAL_OUTPUT)
+
+# ピーク検出（ズレ量）
+_, _, _, max_loc = cv2.minMaxLoc(corr)
+shift = [float(max_loc[0]), float(max_loc[1])]
+
+# wrap-around補正
+h, w = corr.shape
+if shift[0] > w / 2: shift[0] -= w
+if shift[1] > h / 2: shift[1] -= h
+
+print(f"推定シフト: {shift}")
+
+low=10, high=60
+柔らかい特徴だけ、細かい模様を除外（ノイズ除去）
+low=30, high=120
+中程度の模様にフォーカス（繰り返し抑制と特徴強調のバランス）
+low=0, high=20
+高速変化の除去、大域的な構造のみ強調
+
+
+import cv2
+import numpy as np
+import matplotlib.pyplot as plt
+
+def phase_correlation_with_subpixel(img1, img2, low=10, high=100):
+    # 1. 前処理
+    img1 = img1.astype(np.float32)
+    img2 = img2.astype(np.float32)
+
+    # 2. ハニング窓（エッジ抑制）
+    win = cv2.createHanningWindow(img1.shape[::-1], cv2.CV_32F)
+    img1 *= win
+    img2 *= win
+
+    # 3. DFT（複素数2チャンネル）
+    dft1 = cv2.dft(img1, flags=cv2.DFT_COMPLEX_OUTPUT)
+    dft2 = cv2.dft(img2, flags=cv2.DFT_COMPLEX_OUTPUT)
+
+    # 4. バンドパスフィルター
+    dft1 = apply_bandpass_filter(dft1, low, high)
+    dft2 = apply_bandpass_filter(dft2, low, high)
+
+    # 5. クロスパワースペクトルの正規化
+    num = cv2.mulSpectrums(dft1, dft2, flags=0, conjB=True)
+    mag = cv2.magnitude(num[..., 0], num[..., 1])
+    mag[mag == 0] = 1e-6  # 0除算防止
+    num[..., 0] /= mag
+    num[..., 1] /= mag
+
+    # 6. 相関マップ（逆FFT）
+    corr = cv2.idft(num, flags=cv2.DFT_SCALE | cv2.DFT_REAL_OUTPUT)
+
+    # 7. サブピクセル補間
+    peak = subpixel_peak(corr)
+
+    # 8. wrap-around補正
+    h, w = corr.shape
+    dx, dy = peak
+    if dx > w / 2: dx -= w
+    if dy > h / 2: dy -= h
+
+    return (dx, dy), corr, peak
+
+def apply_bandpass_filter(dft, low=10, high=100):
+    h, w = dft.shape[:2]
+    cy, cx = h // 2, w // 2
+    y, x = np.ogrid[:h, :w]
+    dist = np.sqrt((x - cx)**2 + (y - cy)**2)
+    mask = np.logical_and(dist > low, dist < high).astype(np.float32)
+    mask = np.repeat(mask[:, :, np.newaxis], 2, axis=2)
+    return dft * mask
+
+def subpixel_peak(corr):
+    _, _, max_loc, _ = cv2.minMaxLoc(corr)
+    x, y = max_loc
+
+    def parabolic(fm1, f0, fp1):
+        denom = (fm1 - 2*f0 + fp1)
+        if denom == 0:
+            return 0
+        return 0.5 * (fm1 - fp1) / denom
+
+    if 1 <= x < corr.shape[1] - 1:
+        dx = parabolic(corr[y, x-1], corr[y, x], corr[y, x+1])
+    else:
+        dx = 0
+    if 1 <= y < corr.shape[0] - 1:
+        dy = parabolic(corr[y-1, x], corr[y, x], corr[y+1, x])
+    else:
+        dy = 0
+
+    return (x + dx, y + dy)
+
+# ✅ 使用例
+# img1, img2 は同サイズのグレースケール画像
+# 例: img1 = cv2.imread('img1.png', 0)
+
+# dxdy, corrmap, peakraw = phase_correlation_with_subpixel(img1, img2)
+# print(f"推定ズレ量（サブピクセル）: dx={dxdy[0]:.4f}, dy={dxdy[1]:.4f}")
+
+
+
+
+
+
+
+
+
 ✅ 前提（一般化）
 
 紙の高さを h、
