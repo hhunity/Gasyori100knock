@@ -1,3 +1,15 @@
+def compute_response(corr, peak_pos):
+    y, x = int(round(peak_pos[1])), int(round(peak_pos[0]))
+    peak_val = corr[y, x]
+    energy = np.sqrt(np.sum(corr ** 2))
+    if energy == 0:
+        return 0.0
+    return float(peak_val) / energy
+    
+peak_subpixel = subpixel_peak_2d(corr)
+response = compute_response(corr, peak_subpixel)
+
+
 def subpixel_peak_2d(corr):
     _, _, max_loc, _ = cv2.minMaxLoc(corr)
     x0, y0 = max_loc
