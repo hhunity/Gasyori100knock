@@ -1,3 +1,109 @@
+
+##上下・左右対称のピークをペアで除外
+def filter_symmetric_peaks(peaks, corr, tolerance=5):
+    h, w = corr.shape
+    kept = []
+
+    for y, x in peaks:
+        mirror_y = (h - y) % h
+        mirror_x = (w - x) % w
+        val = corr[y, x]
+        mirror_val = corr[mirror_y, mirror_x]
+
+        if abs(val - mirror_val) > 0.05:  # 似すぎていたら対称とみなす
+            kept.append((y, x))
+
+    return kept
+    
+    
+
+###corr の中心から遠いピークを除外する
+def filter_symmetric_peaks(peaks, corr, tolerance=5):
+    h, w = corr.shape
+    kept = []
+
+    for y, x in peaks:
+        mirror_y = (h - y) % h
+        mirror_x = (w - x) % w
+        val = corr[y, x]
+        mirror_val = corr[mirror_y, mirror_x]
+
+        if abs(val - mirror_val) > 0.05:  # 似すぎていたら対称とみなす
+            kept.append((y, x))
+
+    return kept
+
+def filter_by_distance_to_center(peaks, corr_shape, max_distance_ratio=0.5):
+    h, w = corr_shape
+    cx, cy = w / 2, h / 2
+    max_dist = np.hypot(w * max_distance_ratio, h * max_distance_ratio)
+    return [(y, x) for y, x in peaks if np.hypot(x - cx, y - cy) <= max_dist]
+
+def filter_symmetric_peaks(peaks, corr, tolerance=0.05):
+    h, w = corr.shape
+    kept = []
+    for y, x in peaks:
+        mirror_y = (h - y) % h
+        mirror_x = (w - x) % w
+        if abs(corr[y, x] - corr[mirror_y, mirror_x]) > tolerance:
+            kept.append((y, x))
+    return kept
+    
+    
+
+##切り替えつき
+def phase_correlation_with_subpixel_with_tracking(
+    img1, img2, prev_shift=None, peak_threshold=0.2, use_hanning=True,
+    peak_filter_mode="nearest_to_prev", max_dist_ratio=0.5
+):
+    img1 = img1.astype(np.float32)
+    img2 = img2.astype(np.float32)
+
+    if use_hanning:
+        win = cv2.createHanningWindow(img1.shape[::-1], cv2.CV_32F)
+        img1 *= win
+        img2 *= win
+
+    dft1 = cv2.dft(img1, flags=cv2.DFT_COMPLEX_OUTPUT)
+    dft2 = cv2.dft(img2, flags=cv2.DFT_COMPLEX_OUTPUT)
+    cs = cv2.mulSpectrums(dft1, dft2, flags=0, conjB=True)
+
+    mag = cv2.magnitude(cs[..., 0], cs[..., 1])
+    mag[mag == 0] = 1e-6
+    cs[..., 0] /= mag
+    cs[..., 1] /= mag
+
+    corr = cv2.idft(cs, flags=cv2.DFT_SCALE | cv2.DFT_REAL_OUTPUT)
+
+    h, w = corr.shape
+    peaks = find_peak_candidates(corr, threshold=peak_threshold)
+
+    # 🔁 ピークフィルタリング処理（モードに応じて）
+    if peak_filter_mode == "distance_to_center":
+        peaks = filter_by_distance_to_center(peaks, corr.shape, max_distance_ratio=max_dist_ratio)
+    elif peak_filter_mode == "symmetric":
+        peaks = filter_symmetric_peaks(peaks, corr)
+    # "nearest_to_prev" は何もしない（後で prev_shift 使って選択）
+
+    # 📌 ピーク選択
+    if len(peaks) == 0:
+        return (0, 0), 0.0, corr
+
+    if peak_filter_mode == "nearest_to_prev" and prev_shift is not None:
+        best_yx, _ = select_nearest_peak(peaks, corr, prev_shift, w, h)
+    else:
+        best_yx = max(peaks, key=lambda p: corr[p[0], p[1]])  # 最も相関が高い点
+
+    # 🎯 サブピクセル補間
+    y_sub, x_sub = subpixel_peak_2d(corr, best_yx[1], best_yx[0])
+    shift = correct_shift(x_sub, y_sub, w, h)
+    response = compute_response(corr, shift, w, h)
+
+    return shift, response, corr
+
+
+
+
 import numpy as np
 import cv2
 from scipy.ndimage import maximum_filter
