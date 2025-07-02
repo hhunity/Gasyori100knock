@@ -1,3 +1,26 @@
+
+
+def compute_response_like_opencv(corr, peak_loc):
+    """
+    OpenCVのphaseCorrelateのようなresponseを再現する
+    """
+    h, w = corr.shape
+    M, N = h, w
+    win_size = 5
+    half_win = win_size // 2
+
+    y, x = peak_loc
+    minr = max(0, y - half_win)
+    maxr = min(h - 1, y + half_win)
+    minc = max(0, x - half_win)
+    maxc = min(w - 1, x + half_win)
+
+    region = corr[minr:maxr+1, minc:maxc+1]
+    response = np.sum(region) / (M * N)
+
+    return response
+
+
 def mask_corr_near_shift(corr, prev_shift, max_distance=10):
     """
     corr の中で、prev_shift から max_distance 以内の部分だけ残す
