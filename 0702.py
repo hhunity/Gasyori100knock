@@ -1,5 +1,88 @@
 
 
+import numpy as np
+import cv2
+from scipy.signal.windows import hann
+import matplotlib.pyplot as plt
+
+def create_hanning_window(size):
+    """2D Hanning window を生成"""
+    hann_y = hann(size[0], sym=False)
+    hann_x = hann(size[1], sym=False)
+    window = np.outer(hann_y, hann_x)
+    return window.astype(np.float32)
+
+def phase_correlation_like_opencv(img1, img2):
+    """OpenCVのphaseCorrelateと同等の処理"""
+    img1 = np.float32(img1)
+    img2 = np.float32(img2)
+
+    h, w = img1.shape
+    win = create_hanning_window((h, w))
+    img1_win = img1 * win
+    img2_win = img2 * win
+
+    H = cv2.getOptimalDFTSize(h)
+    W = cv2.getOptimalDFTSize(w)
+    padded1 = np.zeros((H, W), dtype=np.float32)
+    padded2 = np.zeros((H, W), dtype=np.float32)
+    padded1[:h, :w] = img1_win
+    padded2[:h, :w] = img2_win
+
+    dft1 = cv2.dft(padded1, flags=cv2.DFT_COMPLEX_OUTPUT)
+    dft2 = cv2.dft(padded2, flags=cv2.DFT_COMPLEX_OUTPUT)
+
+    # conj(dft2)をかける（複素共役）
+    conj_dft2 = dft2.copy()
+    conj_dft2[:, :, 1] *= -1
+
+    numerator = cv2.mulSpectrums(dft1, conj_dft2, 0)
+    mag = cv2.magnitude(numerator[:, :, 0], numerator[:, :, 1])
+    mag[mag == 0] = 1e-10  # ゼロ除算防止
+
+    cross_power_spectrum = numerator / mag[:, :, np.newaxis]
+
+    # 相関マップ（逆FFT）
+    corr = cv2.idft(cross_power_spectrum, flags=cv2.DFT_SCALE | cv2.DFT_REAL_OUTPUT)
+    corr = np.fft.fftshift(corr)
+
+    # ピーク位置を検出
+    _, _, _, peak_loc = cv2.minMaxLoc(corr)
+    peak_y, peak_x = peak_loc[1], peak_loc[0]
+
+    # レスポンス計算（ピーク周囲5x5）
+    window_size = 5
+    half_win = window_size // 2
+    minr = max(0, peak_y - half_win)
+    maxr = min(H - 1, peak_y + half_win)
+    minc = max(0, peak_x - half_win)
+    maxc = min(W - 1, peak_x + half_win)
+    response = np.sum(corr[minr:maxr+1, minc:maxc+1]) / (H * W)
+
+    # 中心からのずれとしてシフト量を算出
+    center = np.array([W / 2, H / 2])
+    shift = center - np.array([peak_x, peak_y])
+
+    # グラフ表示
+    fig, ax = plt.subplots(figsize=(6, 6))
+    ax.imshow(corr, cmap='hot')
+    ax.set_title(f"Correlation Map\nPeak at ({peak_x}, {peak_y}), Response: {response:.5f}")
+    ax.plot(peak_x, peak_y, 'bo')
+    plt.tight_layout()
+    plt.show()
+
+    return shift, response
+
+# テスト用：円をずらして比較
+if __name__ == "__main__":
+    img_base = np.zeros((128, 128), dtype=np.float32)
+    cv2.circle(img_base, (64, 64), 10, 1, -1)
+    img_shifted = np.roll(img_base, shift=(5, -3), axis=(0, 1))
+
+    shift, response = phase_correlation_like_opencv(img_base, img_shifted)
+    print("Detected shift:", shift)
+    print("Response:", response)
+
 def compute_response_like_opencv(corr, peak_loc):
     """
     OpenCVのphaseCorrelateのようなresponseを再現する
