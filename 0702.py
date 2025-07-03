@@ -1,4 +1,24 @@
 
+import numpy as np
+
+def mask_corr_vertical_near_shift(corr, prev_shift_y, max_distance):
+    """
+    corr       : 2D numpy array（相関マップ）
+    prev_shift_y: 前回の縦方向のピーク位置（Y座標）
+    max_distance: 許容する最大縦方向距離（ピクセル単位）
+    """
+    h, w = corr.shape
+
+    # 行ごとにY距離を計算
+    y_coords = np.arange(h).reshape(-1, 1)  # shape (H, 1)
+    distance_from_prev = np.abs(y_coords - prev_shift_y)
+
+    # 条件に合う行は1、合わない行は0
+    mask = (distance_from_prev <= max_distance).astype(np.float32)
+
+    # ブロードキャストで行方向だけマスクを掛ける
+    return corr * mask
+
 
 import numpy as np
 import cv2
