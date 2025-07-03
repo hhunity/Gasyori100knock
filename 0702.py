@@ -1,4 +1,67 @@
 
+
+private void Form1_Load(object sender, EventArgs e)
+{
+    pictureBox1.SizeMode = PictureBoxSizeMode.Zoom;
+    pictureBox1.Image = Image.FromFile("sample.jpg");
+    pictureBox1.Paint += pictureBox1_Paint;
+}
+
+private void pictureBox1_Paint(object sender, PaintEventArgs e)
+{
+    if (pictureBox1.Image == null) return;
+
+    Image img = pictureBox1.Image;
+
+    // 実際に表示されている画像のサイズと位置を計算
+    Rectangle imgRect = GetImageDisplayRectangle(pictureBox1);
+
+    // 描画したい画像内のY座標（例：100px）
+    int imageY = 100;
+
+    // 表示上のY座標にスケーリング
+    float scale = (float)imgRect.Height / img.Height;
+    int yInControl = imgRect.Top + (int)(imageY * scale);
+
+    // 点線ペン
+    using (Pen pen = new Pen(Color.Yellow, 1))
+    {
+        pen.DashStyle = System.Drawing.Drawing2D.DashStyle.Dot;
+        e.Graphics.DrawLine(pen, imgRect.Left, yInControl, imgRect.Right, yInControl);
+    }
+}
+
+/// <summary>
+/// PictureBox.SizeMode = Zoom のとき、表示されている画像の位置とサイズを計算する
+/// </summary>
+private Rectangle GetImageDisplayRectangle(PictureBox pb)
+{
+    if (pb.Image == null) return Rectangle.Empty;
+
+    float imageRatio = (float)pb.Image.Width / pb.Image.Height;
+    float boxRatio = (float)pb.Width / pb.Height;
+
+    int width, height;
+    if (imageRatio > boxRatio)
+    {
+        // 横が余る
+        width = pb.Width;
+        height = (int)(pb.Width / imageRatio);
+    }
+    else
+    {
+        // 縦が余る
+        height = pb.Height;
+        width = (int)(pb.Height * imageRatio);
+    }
+
+    int x = (pb.Width - width) / 2;
+    int y = (pb.Height - height) / 2;
+
+    return new Rectangle(x, y, width, height);
+}
+
+
 import numpy as np
 
 def mask_corr_vertical_near_shift(corr, prev_shift_y, max_distance):
