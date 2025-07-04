@@ -1,4 +1,61 @@
 
+#include <iostream>
+#include <vector>
+#include <stdexcept>
+
+struct LinearModel {
+    double slope;     // a
+    double intercept; // b
+};
+
+// 最小二乗法で線形モデル（y = ax + b）を求める
+LinearModel fitLinearModel(const std::vector<double>& x, const std::vector<double>& y) {
+    size_t n = x.size();
+    if (n != y.size() || n == 0) {
+        throw std::invalid_argument("x and y must have the same non-zero length");
+    }
+
+    double sum_x = 0, sum_y = 0, sum_xy = 0, sum_xx = 0;
+
+    for (size_t i = 0; i < n; ++i) {
+        sum_x  += x[i];
+        sum_y  += y[i];
+        sum_xy += x[i] * y[i];
+        sum_xx += x[i] * x[i];
+    }
+
+    double denominator = n * sum_xx - sum_x * sum_x;
+    if (denominator == 0) {
+        throw std::runtime_error("Denominator is zero; can't fit linear model");
+    }
+
+    double a = (n * sum_xy - sum_x * sum_y) / denominator;
+    double b = (sum_y - a * sum_x) / n;
+
+    return {a, b};
+}
+
+int main() {
+    std::vector<double> x = {1, 2, 3, 4, 5};
+    std::vector<double> y = {2, 4, 5, 4, 5};
+
+    try {
+        LinearModel model = fitLinearModel(x, y);
+        std::cout << "Slope (a): "     << model.slope     << std::endl;
+        std::cout << "Intercept (b): " << model.intercept << std::endl;
+
+        // 予測例
+        double predict_x = 6.0;
+        double predicted_y = model.slope * predict_x + model.intercept;
+        std::cout << "Predicted y at x = " << predict_x << " is " << predicted_y << std::endl;
+
+    } catch (const std::exception& e) {
+        std::cerr << "Error: " << e.what() << std::endl;
+    }
+
+    return 0;
+}
+
 
 private void Form1_Load(object sender, EventArgs e)
 {
