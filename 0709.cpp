@@ -2,6 +2,54 @@
 #include <opencv2/opencv.hpp>
 #include <cmath>
 
+cv::Mat applyBandpassFilter(const cv::Mat& dft, double low = 10.0, double high = 100.0)
+{
+    CV_Assert(dft.type() == CV_32FC2); // 複素数（real, imag）2チャンネル
+
+    int h = dft.rows;
+    int w = dft.cols;
+    int cx = w / 2;
+    int cy = h / 2;
+
+    // 出力をコピー
+    cv::Mat filtered = dft.clone();
+
+    for (int y = 0; y < h; ++y)
+    {
+        for (int x = 0; x < w; ++x)
+        {
+            double dy = y - cy;
+            double dx = x - cx;
+            double dist = std::sqrt(dx * dx + dy * dy);
+
+            if (dist <= low || dist >= high)
+            {
+                // バンドの外はゼロにする（実部・虚部両方）
+                filtered.at<cv::Vec2f>(y, x) = cv::Vec2f(0.0f, 0.0f);
+            }
+        }
+    }
+
+    return filtered;
+}
+
+
+cv::Mat img; // CV_32FC1 グレースケール画像
+cv::Mat dft;
+cv::dft(img, dft, cv::DFT_COMPLEX_OUTPUT);
+
+cv::Mat filtered_dft = applyBandpassFilter(dft, 20.0, 120.0);
+
+// フィルター後に逆変換（必要なら）
+cv::Mat filtered_img;
+cv::dft(filtered_dft, filtered_img, cv::DFT_INVERSE | cv::DFT_REAL_OUTPUT | cv::DFT_SCALE);
+
+
+
+
+#include <opencv2/opencv.hpp>
+#include <cmath>
+
 cv::Mat maskCorrNearShift(const cv::Mat& corr, cv::Point2d prev_shift, double max_distance = 10.0)
 {
     CV_Assert(corr.type() == CV_32FC1 || corr.type() == CV_64FC1);
