@@ -1,3 +1,40 @@
+#include <opencv2/opencv.hpp>
+#include <iostream>
+
+void saveDebugImages(const cv::Mat& img1, const cv::Mat& img2,
+                     const cv::Mat& dft1, const cv::Mat& dft2,
+                     const cv::Mat& numerator, const cv::Mat& corr)
+{
+    // 振幅スペクトルの表示用画像に変換
+    auto computeLogMagnitude = [](const cv::Mat& complex) -> cv::Mat {
+        std::vector<cv::Mat> planes;
+        cv::split(complex, planes);
+        cv::Mat mag;
+        cv::magnitude(planes[0], planes[1], mag);
+        mag += cv::Scalar::all(1); // log(0) 対策
+        cv::log(mag, mag);
+        cv::normalize(mag, mag, 0, 255, cv::NORM_MINMAX);
+        mag.convertTo(mag, CV_8UC1);
+        return mag;
+    };
+
+    // 相関マップの可視化
+    cv::Mat corr_vis;
+    cv::normalize(corr, corr_vis, 0, 255, cv::NORM_MINMAX);
+    corr_vis.convertTo(corr_vis, CV_8UC1);
+    cv::applyColorMap(corr_vis, corr_vis, cv::COLORMAP_HOT);
+
+    // 各画像を保存
+    cv::imwrite("debug_input1.png", img1);
+    cv::imwrite("debug_input2.png", img2);
+    cv::imwrite("debug_fft1.png", computeLogMagnitude(dft1));
+    cv::imwrite("debug_fft2.png", computeLogMagnitude(dft2));
+    cv::imwrite("debug_cross_power.png", computeLogMagnitude(numerator));
+    cv::imwrite("debug_correlation_map.png", corr_vis);
+
+    std::cout << "Debug images saved.\n";
+}
+
 
 #include <opencv2/opencv.hpp>
 #include <cmath>
