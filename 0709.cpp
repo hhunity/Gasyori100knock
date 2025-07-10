@@ -1,3 +1,47 @@
+private void pictureBox1_MouseMove(object sender, MouseEventArgs e)
+{
+    if (pictureBox1.Image == null)
+        return;
+
+    var img = pictureBox1.Image;
+
+    // ピクチャーボックスのサイズ
+    int pbW = pictureBox1.Width;
+    int pbH = pictureBox1.Height;
+
+    // 画像のサイズ
+    int imgW = img.Width;
+    int imgH = img.Height;
+
+    // スケールの計算
+    float ratioX = (float)pbW / imgW;
+    float ratioY = (float)pbH / imgH;
+    float ratio = Math.Min(ratioX, ratioY); // Zoomは縦横比を保つ
+
+    // 実際の表示サイズ
+    int displayW = (int)(imgW * ratio);
+    int displayH = (int)(imgH * ratio);
+
+    // 中央寄せオフセット
+    int offsetX = (pbW - displayW) / 2;
+    int offsetY = (pbH - displayH) / 2;
+
+    // マウス位置（PictureBox内）→ 画像位置
+    int x = (int)((e.X - offsetX) / ratio);
+    int y = (int)((e.Y - offsetY) / ratio);
+
+    // 範囲外チェック
+    if (x >= 0 && x < imgW && y >= 0 && y < imgH)
+    {
+        this.Text = $"Image coordinates: ({x}, {y})";
+    }
+    else
+    {
+        this.Text = "Outside image area";
+    }
+}
+
+
 #include <opencv2/opencv.hpp>
 #include <iostream>
 
