@@ -1,3 +1,40 @@
+
+using System;
+using BitMiracle.LibTiff.Classic;
+
+public static class TiffWriter
+{
+    public static void SaveGrayscaleTiff(string outputPath, byte[] buffer, int width, int height)
+    {
+        if (buffer.Length != width * height)
+            throw new ArgumentException("バッファサイズが画像サイズと一致しません");
+
+        using (Tiff output = Tiff.Open(outputPath, "w"))
+        {
+            output.SetField(TiffTag.IMAGEWIDTH, width);
+            output.SetField(TiffTag.IMAGELENGTH, height);
+            output.SetField(TiffTag.SAMPLESPERPIXEL, 1);
+            output.SetField(TiffTag.BITSPERSAMPLE, 8);
+            output.SetField(TiffTag.ROWSPERSTRIP, height); // 1ストリップ全体
+            output.SetField(TiffTag.COMPRESSION, Compression.LZW); // 無圧縮なら Compression.NONE
+            output.SetField(TiffTag.PHOTOMETRIC, Photometric.MINISBLACK); // 0=黒, 255=白
+            output.SetField(TiffTag.ORIENTATION, Orientation.TOPLEFT);
+            output.SetField(TiffTag.PLANARCONFIG, PlanarConfig.CONTIG);
+
+            int stride = width; // 1ピクセル=1バイト
+
+            for (int row = 0; row < height; row++)
+            {
+                output.WriteScanline(buffer, row * stride, row, 0);
+            }
+
+            output.WriteDirectory();
+        }
+    }
+}
+
+
+
 private void pictureBox1_MouseMove(object sender, MouseEventArgs e)
 {
     if (pictureBox1.Image == null)
