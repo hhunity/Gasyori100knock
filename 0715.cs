@@ -1,3 +1,33 @@
+using (Tiff output = Tiff.Open("output.tif", "w"))
+{
+    // 画像の基本情報を設定
+    output.SetField(TiffTag.IMAGEWIDTH, 256);
+    output.SetField(TiffTag.IMAGELENGTH, 256);
+    output.SetField(TiffTag.SAMPLESPERPIXEL, 1);
+    output.SetField(TiffTag.BITSPERSAMPLE, 8);
+    output.SetField(TiffTag.ROWSPERSTRIP, 256);
+    output.SetField(TiffTag.COMPRESSION, Compression.NONE);
+    output.SetField(TiffTag.PHOTOMETRIC, Photometric.MINISBLACK);
+
+    // カスタムタグ情報を登録
+    output.SetField(TiffTag.EXTENSION, infos); // ←重要
+    byte[] myData = new byte[1024]; // 例：1KBの独自データ
+    new Random().NextBytes(myData); // ダミーデータを格納
+
+    // カスタムタグ書き込み
+    output.SetField((TiffTag)MyCustomTags.MyTag, myData.Length, myData);
+
+    // ダミーの画像データを書き込む（全黒）
+    byte[] scanline = new byte[256];
+    for (int i = 0; i < 256; i++)
+    {
+        output.WriteScanline(scanline, i);
+    }
+}
+
+
+
+
 
 using System;
 using PvDotNet;
