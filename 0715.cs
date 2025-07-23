@@ -1,3 +1,8 @@
+TiffFieldInfo[] infos = {
+    new TiffFieldInfo((TiffTag)MyCustomTags.MyTag, -1, -1, TiffType.UNDEFINED, FieldBit.Custom, true, false, "MyTag")
+};
+
+
 using (Tiff output = Tiff.Open("output.tif", "w"))
 {
     // 画像の基本情報を設定
