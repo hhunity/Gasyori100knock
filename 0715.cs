@@ -1,3 +1,9 @@
+
+public enum MyCustomTags
+{
+    MyTag = 65000
+}
+
 TiffFieldInfo[] infos = {
     new TiffFieldInfo((TiffTag)MyCustomTags.MyTag, -1, -1, TiffType.UNDEFINED, FieldBit.Custom, true, false, "MyTag")
 };
