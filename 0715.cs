@@ -1,39 +1,43 @@
 
-public enum MyCustomTags
+
+static void RegisterCustomTag()
 {
-    MyTag = 65000
+    Tiff.TagExtender extender = new Tiff.TagExtender(CustomTagExtender);
+    Tiff.SetTagExtender(extender);
 }
 
-TiffFieldInfo[] infos = {
-    new TiffFieldInfo((TiffTag)MyCustomTags.MyTag, -1, -1, TiffType.UNDEFINED, FieldBit.Custom, true, false, "MyTag")
-};
-
-
-using (Tiff output = Tiff.Open("output.tif", "w"))
+private static void CustomTagExtender(Tiff tif)
 {
-    // 画像の基本情報を設定
-    output.SetField(TiffTag.IMAGEWIDTH, 256);
-    output.SetField(TiffTag.IMAGELENGTH, 256);
-    output.SetField(TiffTag.SAMPLESPERPIXEL, 1);
-    output.SetField(TiffTag.BITSPERSAMPLE, 8);
-    output.SetField(TiffTag.ROWSPERSTRIP, 256);
-    output.SetField(TiffTag.COMPRESSION, Compression.NONE);
-    output.SetField(TiffTag.PHOTOMETRIC, Photometric.MINISBLACK);
+    TiffFieldInfo[] tiffFieldInfo = {
+        new TiffFieldInfo(MyCustomTag, -1, -1, TiffType.UNDEFINED, FieldBit.Custom, true, false, "MyCustomTag")
+    };
+    tif.MergeFieldInfo(tiffFieldInfo, tiffFieldInfo.Length);
+}
 
-    // カスタムタグ情報を登録
-    output.SetField(TiffTag.EXTENSION, infos); // ←重要
-    byte[] myData = new byte[1024]; // 例：1KBの独自データ
-    new Random().NextBytes(myData); // ダミーデータを格納
+RegisterCustomTag(); // カスタムタグ登録を忘れずに！
+
+using (Tiff tif = Tiff.Open("output.tif", "w"))
+{
+    int width = 256;
+    int height = 256;
+    tif.SetField(TiffTag.IMAGEWIDTH, width);
+    tif.SetField(TiffTag.IMAGELENGTH, height);
+    tif.SetField(TiffTag.BITSPERSAMPLE, 8);
+    tif.SetField(TiffTag.SAMPLESPERPIXEL, 1);
+    tif.SetField(TiffTag.ROWSPERSTRIP, height);
+    tif.SetField(TiffTag.COMPRESSION, Compression.NONE);
+    tif.SetField(TiffTag.PHOTOMETRIC, Photometric.MINISBLACK);
+    tif.SetField(TiffTag.PLANARCONFIG, PlanarConfig.CONTIG);
 
     // カスタムタグ書き込み
-    output.SetField((TiffTag)MyCustomTags.MyTag, myData.Length, myData);
+    byte[] customData = new byte[1024];
+    new Random().NextBytes(customData);
+    tif.SetField(MyCustomTag, customData.Length, customData);
 
-    // ダミーの画像データを書き込む（全黒）
-    byte[] scanline = new byte[256];
-    for (int i = 0; i < 256; i++)
-    {
-        output.WriteScanline(scanline, i);
-    }
+    // 画像データ（ダミー）
+    byte[] buffer = new byte[width];
+    for (int i = 0; i < height; i++)
+        tif.WriteScanline(buffer, i);
 }
 
 
