@@ -1,3 +1,61 @@
+extern "C" {
+#include <tiffio.h>
+}
+#include <iostream>
+#include <vector>
+
+int main() {
+    const int width = 256;
+    const int height = 256;
+    const char* filename = "output_2bit.tif";
+
+    // 1ピクセル2bit → 4ピクセル = 1バイト
+    const int pixels_per_byte = 4;
+    const int row_bytes = (width + pixels_per_byte - 1) / pixels_per_byte;
+
+    // データ格納バッファ（1行ごとにrow_bytes）
+    std::vector<uint8_t> image(height * row_bytes, 0);
+
+    // 画像にグラデーションを入れる（左: 0 → 右: 3）
+    for (int y = 0; y < height; ++y) {
+        for (int x = 0; x < width; ++x) {
+            uint8_t val2bit = (x * 4) / width; // 0〜3
+            int byte_index = y * row_bytes + x / 4;
+            int shift = (3 - (x % 4)) * 2;
+            image[byte_index] |= (val2bit << shift);
+        }
+    }
+
+    TIFF* tif = TIFFOpen(filename, "w");
+    if (!tif) {
+        std::cerr << "TIFFOpen failed!" << std::endl;
+        return 1;
+    }
+
+    TIFFSetField(tif, TIFFTAG_IMAGEWIDTH, width);
+    TIFFSetField(tif, TIFFTAG_IMAGELENGTH, height);
+    TIFFSetField(tif, TIFFTAG_BITSPERSAMPLE, 2);
+    TIFFSetField(tif, TIFFTAG_SAMPLESPERPIXEL, 1);
+    TIFFSetField(tif, TIFFTAG_ROWSPERSTRIP, 1);
+    TIFFSetField(tif, TIFFTAG_COMPRESSION, COMPRESSION_NONE);
+    TIFFSetField(tif, TIFFTAG_PHOTOMETRIC, PHOTOMETRIC_MINISBLACK);
+    TIFFSetField(tif, TIFFTAG_PLANARCONFIG, PLANARCONFIG_CONTIG);
+
+    // 各行ごとに書き込み
+    for (int y = 0; y < height; ++y) {
+        const uint8_t* row = &image[y * row_bytes];
+        if (TIFFWriteScanline(tif, (tdata_t)row, y, 0) < 0) {
+            std::cerr << "Failed to write row " << y << std::endl;
+            break;
+        }
+    }
+
+    TIFFClose(tif);
+    std::cout << "Saved: " << filename << std::endl;
+    return 0;
+}
+
+
 
 extern "C" {
 #include <tiffio.h>
