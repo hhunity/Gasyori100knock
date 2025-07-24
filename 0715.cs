@@ -1,4 +1,22 @@
 
+extern "C" {
+#include <tiffio.h>
+}
+
+int main() {
+    TIFF* tif = TIFFOpen("example.tif", "r");
+    if (tif) {
+        uint32 width, height;
+        TIFFGetField(tif, TIFFTAG_IMAGEWIDTH, &width);
+        TIFFGetField(tif, TIFFTAG_IMAGELENGTH, &height);
+        std::cout << "Width: " << width << ", Height: " << height << std::endl;
+
+        TIFFClose(tif);
+    }
+    return 0;
+}
+
+
 <UserControl x:Class="YourNamespace.BusyOverlay"
              xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
              xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
