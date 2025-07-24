@@ -1,4 +1,53 @@
 
+<Window ...
+    xmlns:local="clr-namespace:YourNamespace">
+
+    <Grid x:Name="RootGrid">
+        <!-- 画面UI -->
+        <StackPanel>
+            <Button Content="処理開始" Click="StartProcess_Click"/>
+        </StackPanel>
+
+        <!-- オーバーレイ -->
+        <local:BusyOverlay x:Name="busyOverlay" Visibility="Collapsed"
+                           Panel.ZIndex="99"/>
+    </Grid>
+</Window>
+
+private async void StartProcess_Click(object sender, RoutedEventArgs e)
+{
+    busyOverlay.Visibility = Visibility.Visible;
+    RootGrid.IsEnabled = false;
+
+    try
+    {
+        await Task.Run(() => {
+            Thread.Sleep(3000); // 重い処理
+        });
+    }
+    finally
+    {
+        busyOverlay.Visibility = Visibility.Collapsed;
+        RootGrid.IsEnabled = true;
+    }
+}
+
+<UserControl x:Class="YourNamespace.BusyOverlay"
+             xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+             xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+             Visibility="Collapsed"
+             Background="#80000000">
+    <Grid>
+        <StackPanel HorizontalAlignment="Center" VerticalAlignment="Center">
+            <TextBlock Text="処理中..." Foreground="White" FontSize="16" Margin="0 0 0 10"/>
+            <ProgressBar IsIndeterminate="True" Width="200" Height="20"/>
+        </StackPanel>
+    </Grid>
+</UserControl>
+
+
+
+
 
 static void RegisterCustomTag()
 {
