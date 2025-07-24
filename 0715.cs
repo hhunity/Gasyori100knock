@@ -1,4 +1,79 @@
 
+<UserControl x:Class="YourNamespace.BusyOverlay"
+             xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+             xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+             Width="Auto" Height="Auto">
+    <Grid Background="#80000000">
+        <StackPanel HorizontalAlignment="Center" VerticalAlignment="Center">
+            <TextBlock x:Name="messageText"
+                       Text="処理中..."
+                       Foreground="White"
+                       FontSize="16"
+                       Margin="0 0 0 10"/>
+            <ProgressBar IsIndeterminate="True" Width="200" Height="20"/>
+        </StackPanel>
+    </Grid>
+</UserControl>
+
+public static class BusyOverlayManager
+{
+    private static BusyOverlay _overlay;
+    private static Grid _rootGrid;
+
+    public static void Initialize(Grid rootGrid)
+    {
+        _rootGrid = rootGrid;
+    }
+
+    public static void Show(string message = "処理中...")
+    {
+        if (_overlay == null)
+        {
+            _overlay = new BusyOverlay();
+            Panel.SetZIndex(_overlay, 999);
+            _overlay.HorizontalAlignment = HorizontalAlignment.Stretch;
+            _overlay.VerticalAlignment = VerticalAlignment.Stretch;
+        }
+
+        (_overlay.FindName("messageText") as TextBlock).Text = message;
+
+        if (!_rootGrid.Children.Contains(_overlay))
+        {
+            _rootGrid.Children.Add(_overlay);
+        }
+    }
+
+    public static void Hide()
+    {
+        if (_overlay != null && _rootGrid.Children.Contains(_overlay))
+        {
+            _rootGrid.Children.Remove(_overlay);
+        }
+    }
+}
+
+public partial class MainWindow : Window
+{
+    public MainWindow()
+    {
+        InitializeComponent();
+        BusyOverlayManager.Initialize(RootGrid); // ← 最初に渡すだけ
+    }
+}
+
+BusyOverlayManager.Show("画像処理中...");
+await Task.Run(() => HeavyProcess());
+BusyOverlayManager.Hide();
+
+
+
+
+
+
+
+
+
+
 
 private BusyOverlay _busyOverlay;
 
