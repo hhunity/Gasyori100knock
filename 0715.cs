@@ -1,4 +1,39 @@
 
+
+private BusyOverlay _busyOverlay;
+
+private async void StartProcess_Click(object sender, RoutedEventArgs e)
+{
+    // BusyOverlay をコードで生成
+    _busyOverlay = new BusyOverlay
+    {
+        HorizontalAlignment = HorizontalAlignment.Stretch,
+        VerticalAlignment = VerticalAlignment.Stretch,
+        Visibility = Visibility.Visible
+    };
+
+    // 最前面に追加
+    Panel.SetZIndex(_busyOverlay, 99);
+    RootGrid.Children.Add(_busyOverlay);
+
+    // UI操作をブロック（任意）
+    RootGrid.IsEnabled = false;
+
+    try
+    {
+        await Task.Run(() =>
+        {
+            Thread.Sleep(3000); // 重たい処理
+        });
+    }
+    finally
+    {
+        // 終了時に削除
+        RootGrid.Children.Remove(_busyOverlay);
+        RootGrid.IsEnabled = true;
+    }
+}
+
 <Window ...
     xmlns:local="clr-namespace:YourNamespace">
 
