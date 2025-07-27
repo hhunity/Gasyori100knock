@@ -1,3 +1,34 @@
+
+using System.IO;
+using System.Windows.Media.Imaging;
+
+public BitmapSource LoadWithCorrectDpi(string path, double targetDpiX, double targetDpiY)
+{
+    using FileStream fs = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.Read);
+    var decoder = new TiffBitmapDecoder(fs, BitmapCreateOptions.PreservePixelFormat, BitmapCacheOption.OnLoad);
+    var frame = decoder.Frames[0];
+
+    int width = frame.PixelWidth;
+    int height = frame.PixelHeight;
+    var format = frame.Format;
+    int bpp = format.BitsPerPixel;
+    int stride = (width * bpp + 7) / 8;
+    byte[] pixels = new byte[stride * height];
+    frame.CopyPixels(pixels, stride, 0);
+
+    // DPI 指定して新しい BitmapSource を作成
+    var fixedSource = BitmapSource.Create(
+        width, height,
+        targetDpiX, targetDpiY,
+        format,
+        frame.Palette,
+        pixels, stride);
+
+    return fixedSource;
+}
+
+
+
 extern "C" {
 #include <tiffio.h>
 }
