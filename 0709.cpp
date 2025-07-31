@@ -1,4 +1,25 @@
 
+using System.Diagnostics;
+using System.IO;
+
+private void buttonEdit_Click(object sender, EventArgs e)
+{
+    string originalText = "初期テキスト"; // ここは編集前のテキスト
+    string tempPath = Path.GetTempFileName();
+
+    File.WriteAllText(tempPath, originalText);
+
+    // メモ帳起動
+    var process = Process.Start("notepad.exe", tempPath);
+    process.WaitForExit(); // 編集完了まで待機
+
+    // 編集された内容を読み込む
+    string editedText = File.ReadAllText(tempPath);
+    MessageBox.Show("編集結果:\n" + editedText);
+
+    File.Delete(tempPath); // 後始末
+}
+
 using System;
 using BitMiracle.LibTiff.Classic;
 
