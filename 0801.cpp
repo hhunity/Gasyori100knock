@@ -1,3 +1,100 @@
+///cuda graph
+
+#include <opencv2/opencv.hpp>
+#include <opencv2/cudaarithm.hpp>
+#include <opencv2/cudafilters.hpp>
+#include <opencv2/cudawarping.hpp>
+#include <opencv2/cudafourier.hpp>
+
+const int IMG_SIZE = 1024;
+const int TILE_SIZE = 256;
+const int TILE_COUNT = 16;
+
+struct TileBuffers {
+    cv::cuda::GpuMat tile;
+    cv::cuda::GpuMat tile_f32;
+    cv::cuda::GpuMat sobel_x, sobel_y;
+    cv::cuda::GpuMat magnitude;
+    cv::cuda::GpuMat fft_result;
+};
+
+void processWithCudaGraph(const std::vector<cv::Mat>& input_frames) {
+    // ---- 固定領域確保 ----
+    cv::cuda::GpuMat input_gpu(IMG_SIZE, IMG_SIZE, CV_8UC1);
+    cv::cuda::GpuMat rotated_gpu;
+
+    // 回転行列（45度）
+    cv::Mat affine = cv::getRotationMatrix2D(cv::Point2f(IMG_SIZE / 2.0f, IMG_SIZE / 2.0f), 45.0, 1.0);
+
+    // タイルごとのバッファ
+    std::vector<TileBuffers> tiles(TILE_COUNT);
+    for (auto& tb : tiles) {
+        tb.tile = cv::cuda::GpuMat(TILE_SIZE, TILE_SIZE, CV_8UC1);
+        tb.tile_f32.create(TILE_SIZE, TILE_SIZE, CV_32F);
+        tb.sobel_x.create(TILE_SIZE, TILE_SIZE, CV_32F);
+        tb.sobel_y.create(TILE_SIZE, TILE_SIZE, CV_32F);
+        tb.magnitude.create(TILE_SIZE, TILE_SIZE, CV_32F);
+        tb.fft_result.create(TILE_SIZE, TILE_SIZE, CV_32FC2);  // FFT結果は複素数
+    }
+
+    // フィルター（共通）
+    auto sobelX = cv::cuda::createSobelFilter(CV_32F, -1, 1, 0);
+    auto sobelY = cv::cuda::createSobelFilter(CV_32F, -1, 0, 1);
+
+    // ストリームとグラフ
+    cudaStream_t stream;
+    cudaStreamCreate(&stream);
+    cudaGraph_t graph;
+    cudaGraphExec_t graphExec;
+
+    // ---- Graph キャプチャ開始 ----
+    input_gpu.upload(input_frames[0], stream);  // 仮の1枚
+
+    // 回転
+    cv::cuda::warpAffine(input_gpu, rotated_gpu, affine, cv::Size(IMG_SIZE, IMG_SIZE), cv::INTER_LINEAR, cv::BORDER_CONSTANT, cv::Scalar(), stream);
+
+    cudaStreamBeginCapture(stream, cudaStreamCaptureModeGlobal);
+
+    // タイル処理
+    int tile_idx = 0;
+    for (int y = 0; y < IMG_SIZE; y += TILE_SIZE) {
+        for (int x = 0; x < IMG_SIZE; x += TILE_SIZE) {
+            auto& tb = tiles[tile_idx++];
+            cv::cuda::GpuMat roi = rotated_gpu(cv::Rect(x, y, TILE_SIZE, TILE_SIZE));
+            roi.copyTo(tb.tile, stream);  // tile = ROI
+
+            // float変換 → Sobel → magnitude → FFT
+            tb.tile.convertTo(tb.tile_f32, CV_32F, 1.0, 0.0, stream);
+            sobelX->apply(tb.tile_f32, tb.sobel_x, stream);
+            sobelY->apply(tb.tile_f32, tb.sobel_y, stream);
+            cv::cuda::magnitude(tb.sobel_x, tb.sobel_y, tb.magnitude, stream);
+            cv::cuda::dft(tb.magnitude, tb.fft_result, TILE_SIZE, stream);
+        }
+    }
+
+    cudaStreamEndCapture(stream, &graph);
+    cudaGraphInstantiate(&graphExec, graph, nullptr, nullptr, 0);
+
+    // ---- 実行ループ（毎フレーム） ----
+    for (const auto& frame : input_frames) {
+        input_gpu.upload(frame, stream);  // 入力を更新（同じアドレス）
+
+        // グラフで処理（回転 + 16タイルの sobel + fft）
+        cudaGraphLaunch(graphExec, stream);
+        cudaStreamSynchronize(stream);
+
+        // fft_result に16個分の結果が格納済み（GPU上）
+    }
+
+    // 後始末
+    cudaStreamDestroy(stream);
+    cudaGraphDestroy(graph);
+    cudaGraphExecDestroy(graphExec);
+}
+
+
+
+
 //////cuda graph
 
 cudaStream_t stream;
