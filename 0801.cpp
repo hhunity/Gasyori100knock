@@ -1,3 +1,46 @@
+
+
+using System;
+using System.Diagnostics;
+using System.Runtime.InteropServices;
+using System.Threading;
+
+class Program
+{
+    [DllImport("winmm.dll")]
+    private static extern uint timeBeginPeriod(uint uMilliseconds);
+    [DllImport("winmm.dll")]
+    private static extern uint timeEndPeriod(uint uMilliseconds);
+
+    static void PreciseSleep(double targetMilliseconds)
+    {
+        timeBeginPeriod(1); // タイマ精度を1msに設定（必須）
+
+        Stopwatch sw = Stopwatch.StartNew();
+
+        // 長い時間はSleepで
+        if (targetMilliseconds > 5)
+            Thread.Sleep((int)(targetMilliseconds - 2)); // 少し手前で止める
+
+        // 残りをbusy waitで精密に調整
+        while (sw.Elapsed.TotalMilliseconds < targetMilliseconds) { }
+
+        timeEndPeriod(1);
+    }
+
+    static void Main()
+    {
+        for (int i = 0; i < 5; i++)
+        {
+            Stopwatch sw = Stopwatch.StartNew();
+            PreciseSleep(100.0);  // 100ms精度 ±0.5ms程度
+            sw.Stop();
+            Console.WriteLine($"Slept: {sw.Elapsed.TotalMilliseconds:F3} ms");
+        }
+    }
+}
+
+
 ///cuda graph
 
 #include <opencv2/opencv.hpp>
