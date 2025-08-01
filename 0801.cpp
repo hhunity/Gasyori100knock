@@ -1,4 +1,95 @@
 
+#include <opencv2/opencv.hpp>
+#include <opencv2/cudaarithm.hpp>
+#include <opencv2/cudafilters.hpp>
+#include <opencv2/cudawarping.hpp>
+#include <opencv2/cudafourier.hpp>
+#include <opencv2/core/cuda_stream_accessor.hpp>  // これが重要！
+
+const int IMG_SIZE = 1024;
+const int TILE_SIZE = 256;
+const int TILE_COUNT = 16;
+
+struct TileBuffers {
+    cv::cuda::GpuMat tile;        // uint8 ROI (from rotated)
+    cv::cuda::GpuMat tile_f32;    // float32
+    cv::cuda::GpuMat sobel_x, sobel_y;
+    cv::cuda::GpuMat magnitude;
+    cv::cuda::GpuMat fft_result;
+};
+
+void processWithCudaGraph(const std::vector<cv::Mat>& input_frames) {
+    // --- OpenCV CUDA Stream を作成 ---
+    cv::cuda::Stream cv_stream;
+
+    // --- GPUメモリ確保 ---
+    cv::cuda::GpuMat input_gpu(IMG_SIZE, IMG_SIZE, CV_8UC1);
+    cv::cuda::GpuMat rotated_gpu(IMG_SIZE, IMG_SIZE, CV_8UC1);
+
+    // --- 回転行列（45度）---
+    cv::Mat affine = cv::getRotationMatrix2D(
+        cv::Point2f(IMG_SIZE / 2.0f, IMG_SIZE / 2.0f), 45.0, 1.0
+    );
+
+    // --- 各タイルのバッファ・フィルタを準備 ---
+    std::vector<TileBuffers> tiles(TILE_COUNT);
+    std::vector<cv::Rect> rois;
+    std::vector<cv::Ptr<cv::cuda::Filter>> sobelXs, sobelYs;
+
+    for (int y = 0; y < IMG_SIZE; y += TILE_SIZE) {
+        for (int x = 0; x < IMG_SIZE; x += TILE_SIZE) {
+            rois.emplace_back(x, y, TILE_SIZE, TILE_SIZE);
+        }
+    }
+
+    for (int i = 0; i < TILE_COUNT; ++i) {
+        tiles[i].tile_f32.create(TILE_SIZE, TILE_SIZE, CV_32F);
+        tiles[i].sobel_x.create(TILE_SIZE, TILE_SIZE, CV_32F);
+        tiles[i].sobel_y.create(TILE_SIZE, TILE_SIZE, CV_32F);
+        tiles[i].magnitude.create(TILE_SIZE, TILE_SIZE, CV_32F);
+        tiles[i].fft_result.create(TILE_SIZE, TILE_SIZE, CV_32FC2); // FFT出力は複素数
+
+        sobelXs.push_back(cv::cuda::createSobelFilter(CV_32F, -1, 1, 0));
+        sobelYs.push_back(cv::cuda::createSobelFilter(CV_32F, -1, 0, 1));
+    }
+
+    // --- CUDA Graph 準備 ---
+    cudaGraph_t graph;
+    cudaGraphExec_t graphExec;
+    cudaStream_t raw_stream = cv::cuda::StreamAccessor::getStream(cv_stream);  // CUDA Graph用
+
+    // ---- Graph記録（最初の1回）----
+    input_gpu.upload(input_frames[0], cv_stream);  // 仮画像で準備
+    cv::cuda::warpAffine(input_gpu, rotated_gpu, affine, rotated_gpu.size(), 0, -1, cv::Scalar(), cv_stream);
+
+    cudaStreamBeginCapture(raw_stream, cudaStreamCaptureModeGlobal);
+
+    for (int i = 0; i < TILE_COUNT; ++i) {
+        tiles[i].tile = rotated_gpu(rois[i]);  // ROIを直接参照
+        tiles[i].tile.convertTo(tiles[i].tile_f32, CV_32F, 1.0, 0.0, cv_stream);
+        sobelXs[i]->apply(tiles[i].tile_f32, tiles[i].sobel_x, cv_stream);
+        sobelYs[i]->apply(tiles[i].tile_f32, tiles[i].sobel_y, cv_stream);
+        cv::cuda::magnitude(tiles[i].sobel_x, tiles[i].sobel_y, tiles[i].magnitude, cv_stream);
+        cv::cuda::dft(tiles[i].magnitude, tiles[i].fft_result, TILE_SIZE, cv_stream);
+    }
+
+    cudaStreamEndCapture(raw_stream, &graph);
+    cudaGraphInstantiate(&graphExec, graph, nullptr, nullptr, 0);
+
+    // ---- 毎フレーム処理ループ ----
+    for (const auto& frame : input_frames) {
+        input_gpu.upload(frame, cv_stream);  // 入力差し替え
+        cudaGraphLaunch(graphExec, raw_stream);  // Graph実行
+        cv_stream.waitForCompletion();  // OpenCV的待機（同期）
+    }
+
+    // --- 後始末 ---
+    cudaGraphDestroy(graph);
+    cudaGraphExecDestroy(graphExec);
+}
+
+
+
 
 using System;
 using System.Diagnostics;
