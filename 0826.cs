@@ -206,3 +206,216 @@ public class PvBuffer
     public long Timestamp => 0;
     public IntPtr GetDataPointer() => IntPtr.Zero;
 }
+
+
+
+using System;
+using System.Buffers;                 // ArrayPool<T>
+using System.Runtime.InteropServices;  // Marshal.Copy
+using System.Threading;
+using System.Threading.Channels;
+using System.Threading.Tasks;
+
+public sealed class Frame
+{
+    public byte[] Buffer { get; }
+    public int Length { get; }
+    public int Width { get; }
+    public int Height { get; }
+    public int Stride { get; }
+    public long Timestamp { get; }
+
+    public Frame(byte[] buffer, int length, int w, int h, int stride, long ts)
+    {
+        Buffer = buffer ?? throw new ArgumentNullException(nameof(buffer));
+        Length = length;
+        Width = w; Height = h; Stride = stride; Timestamp = ts;
+    }
+}
+
+public sealed class TxJob
+{
+    public byte[] Payload { get; }
+    public int Length { get; }
+    public long Timestamp { get; }
+
+    public TxJob(byte[] payload, int length, long ts)
+    {
+        Payload = payload ?? throw new ArgumentNullException(nameof(payload));
+        Length = length; Timestamp = ts;
+    }
+}
+
+public interface IUsbTransport
+{
+    Task SendAsync(byte[] data, int length, CancellationToken ct);
+}
+
+// ===== パイプライン本体（.NET Framework 4.8 で動く形） =====
+public sealed class Pipeline : IDisposable
+{
+    private readonly Channel<Frame> _captureCh;
+    private readonly Channel<TxJob> _txCh;
+    private readonly CancellationTokenSource _cts = new CancellationTokenSource();
+    private readonly IUsbTransport _usb;
+    private readonly int _procDegree;
+
+    public Pipeline(IUsbTransport usb, int captureCapacity = 8, int txCapacity = 32)
+    {
+        _usb = usb ?? throw new ArgumentNullException(nameof(usb));
+        _procDegree = Math.Max(1, Environment.ProcessorCount - 1);
+
+        _captureCh = Channel.CreateBounded<Frame>(
+            new BoundedChannelOptions(captureCapacity)
+            {
+                FullMode = BoundedChannelFullMode.DropOldest, // 最新優先（用途で Wait も可）
+                SingleWriter = true,   // 取得スレッド1本なら高速化
+                SingleReader = false   // 処理ワーカー複数で読む
+            });
+
+        _txCh = Channel.CreateBounded<TxJob>(
+            new BoundedChannelOptions(txCapacity)
+            {
+                FullMode = BoundedChannelFullMode.Wait, // 送信は溜めすぎず待つ
+                SingleWriter = false,
+                SingleReader = true   // 順序・帯域の都合で単一に
+            });
+    }
+
+    // --- 1) 取得ループ（eBUS） ---
+    public void StartCaptureLoop(PvStream stream)
+    {
+        Task.Run(async () =>
+        {
+            var pool = ArrayPool<byte>.Shared;
+
+            try
+            {
+                while (!_cts.IsCancellationRequested)
+                {
+                    // eBUS 側から PvBuffer を取得（あなたのAPIで置換）
+                    PvBuffer pvb = RetrieveBuffer(stream, 1000); // timeout ms
+
+                    int width = pvb.Width;
+                    int height = pvb.Height;
+                    int stride = pvb.Stride;
+                    long ts = pvb.Timestamp;
+                    int bytes = stride * height;
+                    IntPtr src = pvb.GetDataPointer();
+
+                    // すぐ Requeue するため下流用にコピー確保（ArrayPoolでGC圧を下げる）
+                    byte[] dst = pool.Rent(bytes);
+                    try
+                    {
+                        Marshal.Copy(src, dst, 0, bytes); // IntPtr → byte[] コピー
+                    }
+                    catch
+                    {
+                        pool.Return(dst);
+                        Requeue(stream, pvb);
+                        throw;
+                    }
+
+                    Requeue(stream, pvb); // eBUS バッファは即返却
+
+                    // captureCh が満杯なら空くまで“だけ”待つ（処理完了は待たない）
+                    await _captureCh.Writer.WriteAsync(
+                        new Frame(dst, bytes, width, height, stride, ts), _cts.Token);
+                }
+            }
+            catch (OperationCanceledException) { /* stop */ }
+            finally
+            {
+                _captureCh.Writer.TryComplete();
+            }
+        }, _cts.Token);
+    }
+
+    // --- 2) 画像処理ワーカー（並列） ---
+    public void StartProcessingWorkers()
+    {
+        for (int i = 0; i < _procDegree; i++)
+        {
+            Task.Run(async () =>
+            {
+                var pool = ArrayPool<byte>.Shared;
+
+                try
+                {
+                    // net48 では await foreach 使えない → WaitToReadAsync + TryRead で回す
+                    while (await _captureCh.Reader.WaitToReadAsync(_cts.Token))
+                    {
+                        Frame f;
+                        while (_captureCh.Reader.TryRead(out f))
+                        {
+                            // Heavy CPU 処理 → 送信用ペイロード生成（例ではそのままコピー）
+                            // 実際はここでフィルタ/FFT/特徴抽出などを行い、必要サイズのバッファに書く
+                            byte[] payload = pool.Rent(f.Length);
+                            Buffer.BlockCopy(f.Buffer, 0, payload, 0, f.Length);
+
+                            // capture 側のバッファを早めに返却
+                            pool.Return(f.Buffer);
+
+                            // 送信キューが満杯なら空くまで待つ
+                            await _txCh.Writer.WriteAsync(
+                                new TxJob(payload, f.Length, f.Timestamp), _cts.Token);
+                        }
+                    }
+                }
+                catch (OperationCanceledException) { /* stop */ }
+            }, _cts.Token);
+        }
+    }
+
+    // --- 3) USB 送信ループ ---
+    public void StartUsbTxLoop()
+    {
+        Task.Run(async () =>
+        {
+            var pool = ArrayPool<byte>.Shared;
+
+            try
+            {
+                while (await _txCh.Reader.WaitToReadAsync(_cts.Token))
+                {
+                    TxJob job;
+                    while (_txCh.Reader.TryRead(out job))
+                    {
+                        try
+                        {
+                            await _usb.SendAsync(job.Payload, job.Length, _cts.Token);
+                        }
+                        finally
+                        {
+                            pool.Return(job.Payload);
+                        }
+                    }
+                }
+            }
+            catch (OperationCanceledException) { /* stop */ }
+        }, _cts.Token);
+    }
+
+    public void Stop() => _cts.Cancel();
+
+    public void Dispose()
+    {
+        _cts.Cancel();
+        _cts.Dispose();
+    }
+
+    // ==== あなたの eBUS API に置き換えてください ====
+    private PvBuffer RetrieveBuffer(PvStream s, int timeoutMs) { throw new NotImplementedException(); }
+    private void Requeue(PvStream s, PvBuffer b) { throw new NotImplementedException(); }
+}
+
+// ==== 擬似 eBUS 型（置換対象） ====
+public sealed class PvStream { }
+public sealed class PvBuffer
+{
+    public int Width { get; private set; }
+    public int Height { get; private set; }
+    public int Stride { get; private set; }
+    public long Timestamp { get; private set; }
+    public IntPtr GetDataPointer() { return IntPtr.Zero; }
+}
