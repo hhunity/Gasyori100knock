@@ -747,3 +747,395 @@ namespace Net48PipelineSample
 }
 
 
+// Program.cs  (.NET Framework 4.8)
+// NuGet: System.Threading.Channels, System.Buffers
+using System;
+using System.Buffers;
+using System.Collections.Generic;
+using System.Runtime.InteropServices;
+using System.Threading;
+using System.Threading.Channels;
+using System.Threading.Tasks;
+
+namespace Net48_FifoAgg4_Pipeline
+{
+    // ======== DTO =========
+    public sealed class Frame
+    {
+        public int Seq { get; }               // 1,2,3,…
+        public byte[] Buffer { get; }
+        public int Length { get; }
+        public int Width { get; }
+        public int Height { get; }
+        public int Stride { get; }
+        public long Timestamp { get; }
+
+        public Frame(int seq, byte[] buffer, int length, int w, int h, int stride, long ts)
+        {
+            Seq = seq;
+            Buffer = buffer ?? throw new ArgumentNullException(nameof(buffer));
+            Length = length; Width = w; Height = h; Stride = stride; Timestamp = ts;
+        }
+    }
+
+    public sealed class TxJob
+    {
+        public int Seq { get; }               // 1,2,3,…
+        public byte[] Payload { get; }
+        public int Length { get; }
+        public long Timestamp { get; }
+        public TxJob(int seq, byte[] payload, int length, long ts)
+        {
+            Seq = seq;
+            Payload = payload ?? throw new ArgumentNullException(nameof(payload));
+            Length = length; Timestamp = ts;
+        }
+    }
+
+    // ======== 初回処理の共有状態（以降Read専用） ========
+    public sealed class InitState
+    {
+        public readonly byte[] Lut;     // 例: Mono8 LUT
+        public readonly int ParamA;     // 例: 係数
+        public readonly double[] Kernel;// 例: カーネル
+        public InitState(byte[] lut, int a, double[] kernel)
+        {
+            Lut = lut; ParamA = a; Kernel = kernel;
+        }
+    }
+
+    // ======== USB 抽象 & ダミー ========
+    public interface IUsbTransport
+    {
+        Task SendAsync(byte[] data, int length, CancellationToken ct);
+    }
+
+    public sealed class DummyUsbTransport : IUsbTransport
+    {
+        public Task SendAsync(byte[] data, int length, CancellationToken ct)
+        {
+            // 実機では WinUSB/libusb/仮想COM 等に置き換え
+            Console.WriteLine($"[USB] sent {length} bytes");
+            return Task.CompletedTask;
+        }
+    }
+
+    // ======== eBUS 擬似（実機に置換） ========
+    public sealed class PvStream { }
+    public sealed class PvBuffer
+    {
+        public int Width { get; private set; }
+        public int Height { get; private set; }
+        public int Stride { get; private set; }
+        public long Timestamp { get; private set; }
+        private IntPtr _ptr;
+        public PvBuffer(int w, int h)
+        {
+            Width = w; Height = h; Stride = w; Timestamp = DateTime.UtcNow.Ticks;
+            _ptr = IntPtr.Zero;
+        }
+        public IntPtr GetDataPointer() => _ptr;
+    }
+
+    // ======== パイプライン本体 ========
+    public sealed class Pipeline : IDisposable
+    {
+        // --- Channels ---
+        private readonly Channel<Frame> _captureCh;
+        private readonly Channel<TxJob> _txCh;
+
+        // --- Tasks & Control ---
+        private readonly CancellationTokenSource _cts = new CancellationTokenSource();
+        private Task _captureTask;
+        private Task[] _workerTasks;
+        private Task _txTask;
+        private volatile bool _captureStopRequested;
+
+        // --- Config ---
+        private readonly IUsbTransport _usb;
+        private readonly int _procDegree;
+
+        // --- 初回処理ゲート & 共有状態 ---
+        private TaskCompletionSource<bool> _initGate = new TaskCompletionSource<bool>();
+        private int _initStarted = 0;          // 0=未開始,1=開始済み
+        private InitState _state;              // 初回で設定→以降Read専用
+
+        // --- Seq採番 & 厳密順序 集約(4枚平均) ---
+        private int _seqGen = 0;               // 1,2,3,...
+        private const int AggregateGroupSize = 4;
+        private int _nextGroupToSend = 0;      // groupId=0,1,2,... の順
+        private readonly Dictionary<int, List<TxJob>> _groups = new Dictionary<int, List<TxJob>>();
+
+        public Pipeline(
+            IUsbTransport usb,
+            int captureCapacity = 8,
+            int txCapacity = 64,
+            int? degree = null)
+        {
+            _usb = usb ?? throw new ArgumentNullException(nameof(usb));
+            _procDegree = degree ?? Math.Max(1, Environment.ProcessorCount - 1);
+
+            // 厳密順序にするなら欠番NG → captureは Wait を推奨
+            _captureCh = Channel.CreateBounded<Frame>(new BoundedChannelOptions(captureCapacity)
+            {
+                FullMode = BoundedChannelFullMode.Wait,   // 欠落禁止
+                SingleWriter = true,                      // 取得1本
+                SingleReader = false                      // ワーカー複数
+            });
+
+            _txCh = Channel.CreateBounded<TxJob>(new BoundedChannelOptions(txCapacity)
+            {
+                FullMode = BoundedChannelFullMode.Wait,   // 送信前で落とさない
+                SingleWriter = false,
+                SingleReader = true                       // 送信は単一スレッド
+            });
+        }
+
+        // ========= 1) 取得（実機では eBUS API に差し替え） =========
+        public void StartCaptureLoop(PvStream stream, int width, int height, int mockFps = 60)
+        {
+            _captureTask = Task.Run(async () =>
+            {
+                var pool = ArrayPool<byte>.Shared;
+                var periodMs = Math.Max(1, 1000 / Math.Max(1, mockFps)); // デモ用fps
+                try
+                {
+                    while (!_captureStopRequested)
+                    {
+                        // 実機: RetrieveBuffer(out PvBuffer pvb, timeout) → Marshal.Copy / unsafe copy → Requeue
+                        int stride = width;
+                        int bytes = stride * height;
+                        byte[] dst = pool.Rent(bytes);
+                        // デモ: ダミーデータ作成
+                        for (int i = 0; i < bytes; i++) dst[i] = (byte)(i & 0xFF);
+                        long ts = DateTime.UtcNow.Ticks;
+
+                        int seq = Interlocked.Increment(ref _seqGen);
+                        await _captureCh.Writer.WriteAsync(new Frame(seq, dst, bytes, width, height, stride, ts), _cts.Token);
+
+                        await Task.Delay(periodMs, _cts.Token);
+                    }
+                }
+                catch (OperationCanceledException) { /* 急停止 */ }
+                finally
+                {
+                    // 新規投入終了
+                    _captureCh.Writer.TryComplete();
+                }
+            }, _cts.Token);
+        }
+
+        // ========= 2) 画像処理ワーカー（初回→ゲート→通常） =========
+        public void StartProcessingWorkers()
+        {
+            _workerTasks = new Task[_procDegree];
+            for (int i = 0; i < _procDegree; i++)
+            {
+                _workerTasks[i] = Task.Run(async () =>
+                {
+                    var pool = ArrayPool<byte>.Shared;
+
+                    try
+                    {
+                        while (await _captureCh.Reader.WaitToReadAsync(_cts.Token))
+                        {
+                            Frame f;
+                            while (_captureCh.Reader.TryRead(out f))
+                            {
+                                if (Interlocked.CompareExchange(ref _initStarted, 1, 0) == 0)
+                                {
+                                    try
+                                    {
+                                        _state = await DoFirstFrameInitializationAsync(f, _cts.Token); // 初回だけ
+                                        _initGate.TrySetResult(true); // 門を開く（可視性保証）
+                                    }
+                                    catch (Exception ex)
+                                    {
+                                        _initGate.TrySetException(ex);
+                                        throw;
+                                    }
+
+                                    await ProcessNormallyUsingStateAsync(f, _cts.Token);
+                                }
+                                else
+                                {
+                                    await _initGate.Task;             // 初回完了を待つ
+                                    await ProcessNormallyUsingStateAsync(f, _cts.Token);
+                                }
+                            }
+                        }
+                    }
+                    catch (OperationCanceledException) { /* 急停止 */ }
+                }, _cts.Token);
+            }
+        }
+
+        // ========= 3) 送信（4枚平均 + 厳密順序） =========
+        public void StartUsbTxLoop_Aggregate4_Strict()
+        {
+            _txTask = Task.Run(async () =>
+            {
+                var pool = ArrayPool<byte>.Shared;
+                try
+                {
+                    _nextGroupToSend = 0;
+
+                    while (await _txCh.Reader.WaitToReadAsync(_cts.Token))
+                    {
+                        TxJob job;
+                        while (_txCh.Reader.TryRead(out job))
+                        {
+                            int groupId = (job.Seq - 1) / AggregateGroupSize;
+                            List<TxJob> list;
+                            if (!_groups.TryGetValue(groupId, out list))
+                            {
+                                list = new List<TxJob>(AggregateGroupSize);
+                                _groups[groupId] = list;
+                            }
+                            list.Add(job);
+
+                            await FlushReadyGroupsInOrderAsync(pool, _cts.Token);
+                        }
+                    }
+
+                    // close後の最終flush
+                    await FlushReadyGroupsInOrderAsync(pool, _cts.Token);
+
+                    // 揃い切らなかったグループを解放（厳密順序なので送らない）
+                    foreach (var kv in _groups)
+                        foreach (var j in kv.Value) pool.Return(j.Payload);
+                    _groups.Clear();
+                }
+                catch (OperationCanceledException) { /* 急停止 */ }
+            }, _cts.Token);
+        }
+
+        private async Task FlushReadyGroupsInOrderAsync(ArrayPool<byte> pool, CancellationToken ct)
+        {
+            List<TxJob> list;
+            while (_groups.TryGetValue(_nextGroupToSend, out list))
+            {
+                if (list.Count < AggregateGroupSize) break; // 揃うまで待つ（厳密順序）
+
+                int len = list[0].Length;                   // 同サイズ前提
+                byte[] avg = pool.Rent(len);
+
+                try
+                {
+                    // 4枚の画素平均（Mono8想定、四捨五入）
+                    for (int i = 0; i < len; i++)
+                    {
+                        int sum = list[0].Payload[i] + list[1].Payload[i] + list[2].Payload[i] + list[3].Payload[i];
+                        avg[i] = (byte)((sum + 2) >> 2);
+                    }
+
+                    await _usb.SendAsync(avg, len, ct);
+                }
+                finally
+                {
+                    // 入力と平均のバッファ返却
+                    for (int k = 0; k < AggregateGroupSize; k++)
+                        pool.Return(list[k].Payload);
+                    pool.Return(avg);
+                }
+
+                _groups.Remove(_nextGroupToSend);
+                _nextGroupToSend++;
+            }
+        }
+
+        // ========= 初回処理 & 通常処理（ダミー実装。実処理に差し替えOK） =========
+        private Task<InitState> DoFirstFrameInitializationAsync(Frame f, CancellationToken ct)
+        {
+            // 例：LUT恒等、適当なカーネル
+            var lut = new byte[256];
+            for (int i = 0; i < lut.Length; i++) lut[i] = (byte)i;
+            int a = 42;
+            var kernel = new double[] { 0, 1, 0, 1, -4, 1, 0, 1, 0 };
+            return Task.FromResult(new InitState(lut, a, kernel));
+        }
+
+        private async Task ProcessNormallyUsingStateAsync(Frame f, CancellationToken ct)
+        {
+            var s = _state; // 可視性OK（_initGate後に参照）
+            var pool = ArrayPool<byte>.Shared;
+            byte[] payload = pool.Rent(f.Length);
+            try
+            {
+                // 例1: LUT適用（Mono8）
+                ApplyLutMono8(f.Buffer, payload, f.Length, s.Lut);
+                // 例2: 必要なら畳み込み等もここで（省略）
+
+                await _txCh.Writer.WriteAsync(new TxJob(f.Seq, payload, f.Length, f.Timestamp), ct);
+            }
+            catch
+            {
+                pool.Return(payload);
+                throw;
+            }
+            finally
+            {
+                pool.Return(f.Buffer);
+            }
+        }
+
+        private static void ApplyLutMono8(byte[] src, byte[] dst, int length, byte[] lut)
+        {
+            for (int i = 0; i < length; i++) dst[i] = lut[src[i]];
+        }
+
+        // ========= 停止系 =========
+        /// <summary> 優雅停止：新規取り込みを止め、残りを全て処理＆送信してから止まる </summary>
+        public async Task StopGracefullyAsync()
+        {
+            _captureStopRequested = true;                 // 1) 新規取り込み停止
+            if (_captureTask != null) await _captureTask.ConfigureAwait(false); // 2) 取得終了→captureCh close 済み
+            if (_workerTasks != null && _workerTasks.Length > 0)
+                await Task.WhenAll(_workerTasks).ConfigureAwait(false);         // 3) 全ワーカー完了
+            _txCh.Writer.TryComplete();                   // 4) 送信への新規投入停止
+            if (_txTask != null) await _txTask.ConfigureAwait(false);           // 5) 送信が読み切って終了
+        }
+
+        /// <summary> 強制停止：今すぐ止める（未処理が残る可能性あり） </summary>
+        public void Stop() => _cts.Cancel();
+
+        public void Dispose()
+        {
+            _cts.Cancel();
+            _cts.Dispose();
+        }
+    }
+
+    // ======== エントリポイント ========
+    class Program
+    {
+        static void Main(string[] args)
+        {
+            var usb = new DummyUsbTransport();
+            var pipe = new Pipeline(usb,
+                                    captureCapacity: 8,  // 厳密順序なので欠番NG → Wait
+                                    txCapacity: 64,
+                                    degree: Math.Max(1, Environment.ProcessorCount - 1));
+
+            var stream = new PvStream();
+            pipe.StartCaptureLoop(stream, width: 640, height: 480, mockFps: 60);
+            pipe.StartProcessingWorkers();
+            pipe.StartUsbTxLoop_Aggregate4_Strict();
+
+            Console.WriteLine("Running... ENTER=graceful stop, 'x'+ENTER=force stop");
+            var line = Console.ReadLine();
+            if (line == "x")
+            {
+                pipe.Stop();          // 強制停止
+            }
+            else
+            {
+                pipe.StopGracefullyAsync().GetAwaiter().GetResult(); // 優雅停止
+            }
+
+            pipe.Dispose();
+            Console.WriteLine("Stopped.");
+        }
+    }
+}
+
