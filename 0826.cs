@@ -1,3 +1,50 @@
+
+#include <windows.h>
+#include <iostream>
+#include <vector>
+
+int main()
+{
+    // 実行中の EXE のパスを取得
+    char filename[MAX_PATH];
+    GetModuleFileNameA(NULL, filename, MAX_PATH);
+
+    // バージョン情報サイズを取得
+    DWORD handle = 0;
+    DWORD verSize = GetFileVersionInfoSizeA(filename, &handle);
+    if (verSize == 0) {
+        std::cerr << "No version info found\n";
+        return 1;
+    }
+
+    // バッファ確保
+    std::vector<char> verData(verSize);
+
+    // バージョン情報を取得
+    if (!GetFileVersionInfoA(filename, handle, verSize, verData.data())) {
+        std::cerr << "GetFileVersionInfo failed\n";
+        return 1;
+    }
+
+    // 固定情報を取り出す
+    VS_FIXEDFILEINFO* fileInfo = nullptr;
+    UINT size = 0;
+    if (VerQueryValueA(verData.data(), "\\", (LPVOID*)&fileInfo, &size) && size) {
+        if (fileInfo->dwSignature == VS_FFI_SIGNATURE) {
+            DWORD major = HIWORD(fileInfo->dwFileVersionMS);
+            DWORD minor = LOWORD(fileInfo->dwFileVersionMS);
+            DWORD build = HIWORD(fileInfo->dwFileVersionLS);
+            DWORD revision = LOWORD(fileInfo->dwFileVersionLS);
+
+            std::cout << "File Version: " 
+                      << major << "." << minor << "." << build << "." << revision << "\n";
+        }
+    }
+
+    return 0;
+}
+
+
 •	captureCh：フレーム受け渡し（取得→処理へ）。容量小さめでバックプレッシャ。
 	•	txCh：送信ジョブ（処理→USBへ）。
 	•	画像処理ワーカーは ProcessorCount-1 並列。
