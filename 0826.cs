@@ -1,3 +1,71 @@
+
+// MyLib.cpp
+#include <windows.h>
+#include <winver.h>
+#include <vector>
+#include <string>
+#pragma comment(lib, "Version.lib")
+
+extern "C" __declspec(dllexport)
+wchar_t* __cdecl GetDllProductVersion() {
+    // 1) 自分自身（この関数が属するモジュール）のハンドル
+    HMODULE hMod = nullptr;
+    GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS |
+                       GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+                       (LPCWSTR)&GetDllProductVersion, &hMod);
+
+    // 2) パス
+    wchar_t path[MAX_PATH];
+    GetModuleFileNameW(hMod, path, MAX_PATH);
+
+    // 3) Version 情報取得
+    DWORD dummy = 0;
+    DWORD sz = GetFileVersionInfoSizeW(path, &dummy);
+    if (!sz) return nullptr;
+
+    std::vector<BYTE> buf(sz);
+    if (!GetFileVersionInfoW(path, 0, sz, buf.data())) return nullptr;
+
+    // 4) 文字列 "ProductVersion" を lang/cp を見て取得（なければ "FileVersion"）
+    auto queryStr = [&](LPCWSTR key)->std::wstring {
+        struct LANGCP { WORD lang; WORD cp; } *tr = nullptr;
+        UINT cb = 0;
+        if (VerQueryValueW(buf.data(), L"\\VarFileInfo\\Translation", (LPVOID*)&tr, &cb) && cb >= sizeof(LANGCP)) {
+            for (UINT i=0; i<cb/sizeof(LANGCP); ++i) {
+                wchar_t sub[64];
+                swprintf_s(sub, L"\\StringFileInfo\\%04x%04x\\%s", tr[i].lang, tr[i].cp, key);
+                LPVOID p=nullptr; UINT s=0;
+                if (VerQueryValueW(buf.data(), sub, &p, &s) && s) return std::wstring((wchar_t*)p, s-1);
+            }
+        }
+        return L"";
+    };
+
+    std::wstring ver = queryStr(L"ProductVersion");
+    if (ver.empty()) ver = queryStr(L"FileVersion");
+    if (ver.empty()) {
+        // 5) 最後の手段：固定情報から数字4要素
+        VS_FIXEDFILEINFO* ffi=nullptr; UINT s=0;
+        if (VerQueryValueW(buf.data(), L"\\", (LPVOID*)&ffi, &s) && ffi && ffi->dwSignature==VS_FFI_SIGNATURE) {
+            wchar_t tmp[64];
+            swprintf_s(tmp, L"%u.%u.%u.%u",
+                HIWORD(ffi->dwFileVersionMS), LOWORD(ffi->dwFileVersionMS),
+                HIWORD(ffi->dwFileVersionLS), LOWORD(ffi->dwFileVersionLS));
+            ver = tmp;
+        }
+    }
+    if (ver.empty()) ver = L"unknown";
+
+    // 6) CoTaskMemAlloc で返す（C# が自動解放可）
+    size_t n = ver.size() + 1;
+    auto* p = (wchar_t*)CoTaskMemAlloc(n * sizeof(wchar_t));
+    if (!p) return nullptr;
+    wcscpy_s(p, n, ver.c_str());
+    return p;
+}
+
+
+
 extern "C" __declspec(dllexport)
 wchar_t* __cdecl GetDllVersionString()
 {
