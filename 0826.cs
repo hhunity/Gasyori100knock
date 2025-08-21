@@ -1,3 +1,31 @@
+// 例: フォーム上の「表示」ボタン
+private void buttonShow_Click(object sender, EventArgs e)
+{
+    var path = @"C:\temp\sample.txt"; // 固定でもOpenFileDialogでもOK
+    string text;
+    try
+    {
+        // 必要に応じて Encoding を指定（UTF-8想定）
+        text = System.IO.File.ReadAllText(path, System.Text.Encoding.UTF8);
+    }
+    catch (Exception ex)
+    {
+        MessageBox.Show($"読み込み失敗: {ex.Message}");
+        return;
+    }
+
+    // 1) 中身をポップアップで表示
+    using (var dlg = new TextViewerDialog(text, System.IO.Path.GetFileName(path)))
+    {
+        dlg.ShowDialog(this);
+    }
+
+    // 2) 表示を閉じた“後”に続きの処理
+    // ここに「保存」「後続の解析」「別ウィンドウ起動」などを書けば良い
+    MessageBox.Show("続きの処理を実行しました。");
+}
+
+
 
 // MyLib.cpp
 #include <windows.h>
