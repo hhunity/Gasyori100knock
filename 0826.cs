@@ -1,3 +1,64 @@
+extern "C" __declspec(dllexport)
+wchar_t* __cdecl GetDllVersionString()
+{
+    // 1) この関数のアドレスから、自分の HMODULE を得る
+    HMODULE hMod = nullptr;
+    GetModuleHandleExW(
+        GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS |
+        GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+        (LPCWSTR)&GetDllVersionString,   // ←自分のエクスポート関数のアドレス
+        &hMod);
+
+    // 2) DLL のフルパス
+    wchar_t path[MAX_PATH];
+    GetModuleFileNameW(hMod, path, MAX_PATH);
+
+    // 3) そのパスに対して Version 情報を読む
+    DWORD dummy = 0;
+    DWORD sz = GetFileVersionInfoSizeW(path, &dummy);
+    if (!sz) return nullptr;
+
+    std::vector<BYTE> buf(sz);
+    if (!GetFileVersionInfoW(path, 0, sz, buf.data())) return nullptr;
+
+    // ProductVersion → FileVersion → 固定情報の順に取得
+    auto queryStr = [&](LPCWSTR name)->std::wstring {
+        struct LANGANDCODEPAGE { WORD lang; WORD code; } *tr = nullptr;
+        UINT cb = 0;
+        if (VerQueryValueW(buf.data(), L"\\VarFileInfo\\Translation", (LPVOID*)&tr, &cb) && cb>=sizeof(*tr)) {
+            for (UINT i=0;i<cb/sizeof(*tr);++i) {
+                wchar_t sb[64];
+                swprintf_s(sb, L"\\StringFileInfo\\%04x%04x\\%s", tr[i].lang, tr[i].code, name);
+                LPVOID p=nullptr; UINT s=0;
+                if (VerQueryValueW(buf.data(), sb, &p, &s) && s) return std::wstring((wchar_t*)p, s-1);
+            }
+        }
+        return L"";
+    };
+
+    std::wstring ver = queryStr(L"ProductVersion");
+    if (ver.empty()) ver = queryStr(L"FileVersion");
+    if (ver.empty()) {
+        VS_FIXEDFILEINFO* ffi=nullptr; UINT s=0;
+        if (VerQueryValueW(buf.data(), L"\\", (LPVOID*)&ffi, &s) && ffi && ffi->dwSignature==VS_FFI_SIGNATURE) {
+            wchar_t tmp[64];
+            swprintf_s(tmp, L"%u.%u.%u.%u",
+                HIWORD(ffi->dwFileVersionMS), LOWORD(ffi->dwFileVersionMS),
+                HIWORD(ffi->dwFileVersionLS), LOWORD(ffi->dwFileVersionLS));
+            ver = tmp;
+        }
+    }
+    if (ver.empty()) ver = L"unknown";
+
+    // CoTaskMemAlloc で返す（C# が自動解放可能）
+    size_t n = ver.size()+1;
+    auto* p = (wchar_t*)CoTaskMemAlloc(n*sizeof(wchar_t));
+    if (!p) return nullptr;
+    wcscpy_s(p, n, ver.c_str());
+    return p;
+}
+
+
 
 HMODULE h = LoadLibraryExW(L"Target.dll", nullptr, LOAD_LIBRARY_AS_DATAFILE | LOAD_LIBRARY_AS_IMAGE_RESOURCE);
 wchar_t path[MAX_PATH]; GetModuleFileNameW(h, path, MAX_PATH);
