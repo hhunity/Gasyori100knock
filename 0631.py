@@ -1,4 +1,6 @@
 
+エンコーダはラッチ時刻があれば良い
+
 using System;
 using System.Diagnostics;
 using PvDotNet;   // eBUS .NET 名前空間に合わせて調整してください
