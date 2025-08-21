@@ -1,4 +1,8 @@
 
+HMODULE h = LoadLibraryExW(L"Target.dll", nullptr, LOAD_LIBRARY_AS_DATAFILE | LOAD_LIBRARY_AS_IMAGE_RESOURCE);
+wchar_t path[MAX_PATH]; GetModuleFileNameW(h, path, MAX_PATH);
+// （もしくは最初から絶対パスがあるなら path を直接使う）
+
 #include <windows.h>
 #include <iostream>
 #include <vector>
