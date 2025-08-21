@@ -1,3 +1,21 @@
+
+// TextViewerDialog.cs
+public partial class TextViewerDialog : Form
+{
+    public TextViewerDialog(string content, string title = "プレビュー")
+    {
+        InitializeComponent();
+        this.Text = title;
+        var tb = new TextBox {
+            Multiline = true, ReadOnly = true, Dock = DockStyle.Fill,
+            ScrollBars = ScrollBars.Both, WordWrap = false
+        };
+        tb.Text = content;
+        this.Controls.Add(tb);
+        this.ClientSize = new System.Drawing.Size(800, 600);
+    }
+}
+
 // 例: フォーム上の「表示」ボタン
 private void buttonShow_Click(object sender, EventArgs e)
 {
