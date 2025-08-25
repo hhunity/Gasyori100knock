@@ -1,4 +1,22 @@
-  <!-- ▼ C#の 1.0.* と同一アルゴリズム ▼ -->
+
+    <!-- C# の AssemblyVersion("1.0.*") と同じ規則 -->
+  <PropertyGroup>
+    <!-- Build番号: 2000/01/01 からの日数 -->
+    <BUILD_NUMBER>$([System.DateTime]::UtcNow.Subtract(new System.DateTime(2000,1,1)).Days)</BUILD_NUMBER>
+    <!-- Revision番号: 当日0:00からの秒数 / 2 -->
+    <REV_NUMBER>$([System.Int32]::Parse($([System.Math]::Floor([System.DateTime]::UtcNow.TimeOfDay.TotalSeconds / 2).ToString())))</REV_NUMBER>
+  </PropertyGroup>
+
+  <ItemDefinitionGroup>
+    <ResourceCompile>
+      <PreprocessorDefinitions>
+        VER_MAJOR=1;VER_MINOR=0;VER_BUILD=$(BUILD_NUMBER);VER_REV=$(REV_NUMBER);%(PreprocessorDefinitions)
+      </PreprocessorDefinitions>
+    </ResourceCompile>
+  </ItemDefinitionGroup>
+    
+      
+          <!-- ▼ C#の 1.0.* と同一アルゴリズム ▼ -->
   <PropertyGroup>
     <!-- Build: 2000/01/01 からの日数 -->
     <BUILD_NUMBER>$([System.DateTime]::Now.Subtract([datetime]"2000-01-01").Days)</BUILD_NUMBER>
