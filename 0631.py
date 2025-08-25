@@ -1,4 +1,24 @@
-  <!-- ▼▼ ここから追記：日時をプロパティ化 ▼▼ -->
+  <!-- ▼ C#の 1.0.* と同一アルゴリズム ▼ -->
+  <PropertyGroup>
+    <!-- Build: 2000/01/01 からの日数 -->
+    <BUILD_NUMBER>$([System.DateTime]::Now.Subtract([datetime]"2000-01-01").Days)</BUILD_NUMBER>
+
+    <!-- Revision: 当日0:00からの秒数/2（切り捨て） -->
+    <SECONDS_TODAY>$([System.DateTime]::Now.TimeOfDay.TotalSeconds)</SECONDS_TODAY>
+    <REV_NUMBER>$([System.Int32]::Parse($([System.Math]::Floor($([System.Double]::Parse($(SECONDS_TODAY))) / 2).ToString())))</REV_NUMBER>
+  </PropertyGroup>
+
+  <ItemDefinitionGroup>
+    <ResourceCompile>
+      <PreprocessorDefinitions>
+        VER_MAJOR=1;VER_MINOR=0;VER_BUILD=$(BUILD_NUMBER);VER_REV=$(REV_NUMBER);%(PreprocessorDefinitions)
+      </PreprocessorDefinitions>
+    </ResourceCompile>
+  </ItemDefinitionGroup>
+  <!-- ▲ ここまでを Microsoft.Cpp.targets の Import の直前に置く -->
+  
+    
+        <!-- ▼▼ ここから追記：日時をプロパティ化 ▼▼ -->
   <PropertyGroup>
     <!-- MSBuild はローカル時刻（JST等）で評価します -->
     <BUILD_DAYOFYEAR>$([System.DateTime]::Now.DayOfYear)</BUILD_DAYOFYEAR>
