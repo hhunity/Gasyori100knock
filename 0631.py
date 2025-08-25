@@ -1,5 +1,17 @@
 
 <PropertyGroup>
+  <!-- 年下2桁 -->
+  <Y>$([System.DateTime]::UtcNow.ToString("yy"))</Y>
+  <!-- DayOfYear（常に3桁に整形） -->
+  <D>$([System.DateTime]::UtcNow.DayOfYear.ToString("000"))</D>
+  <!-- 連結 -->
+  <BUILD_NUMBER>$([System.String]::Concat($(Y),$(D)))</BUILD_NUMBER>
+
+  <!-- Revision = HHmm -->
+  <REV_NUMBER>$([System.DateTime]::UtcNow.ToString("HHmm"))</REV_NUMBER>
+</PropertyGroup>
+
+<PropertyGroup>
   <!-- Build番号: 年 × 1000 + 日通算（おおよそユニーク）-->
   <BUILD_NUMBER>$([System.Int32]::Parse($([System.DateTime]::UtcNow.Year)*1000 + $([System.DateTime]::UtcNow.DayOfYear)))</BUILD_NUMBER>
 
