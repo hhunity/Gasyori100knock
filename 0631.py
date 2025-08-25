@@ -1,4 +1,20 @@
+  <!-- ▼▼ ここから追記：日時をプロパティ化 ▼▼ -->
+  <PropertyGroup>
+    <!-- MSBuild はローカル時刻（JST等）で評価します -->
+    <BUILD_DAYOFYEAR>$([System.DateTime]::Now.DayOfYear)</BUILD_DAYOFYEAR>
+    <BUILD_HHMM>$([System.DateTime]::Now.ToString("HHmm"))</BUILD_HHMM>
+  </PropertyGroup>
 
+  <!-- リソースコンパイル(rc.exe)に数値マクロを渡す -->
+  <ItemDefinitionGroup>
+    <ResourceCompile>
+      <PreprocessorDefinitions>
+        VER_MAJOR=1;VER_MINOR=0;VER_BUILD=$(BUILD_DAYOFYEAR);VER_REV=$(BUILD_HHMM);%(PreprocessorDefinitions)
+      </PreprocessorDefinitions>
+    </ResourceCompile>
+  </ItemDefinitionGroup>
+  <!-- ▲▲ ここまで追記 ▲▲ -->
+</Project>
 エンコーダはラッチ時刻があれば良い
 
 using System;
