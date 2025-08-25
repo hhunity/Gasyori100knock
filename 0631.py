@@ -1,3 +1,30 @@
+<PropertyGroup>
+  <!-- 基準日 (2000/01/01) の Ticks -->
+  <BASE_TICKS>$([System.DateTime]::Parse("2000-01-01").Ticks)</BASE_TICKS>
+
+  <!-- 現在時刻 (UTC) の Ticks -->
+  <NOW_TICKS>$([System.DateTime]::UtcNow.Ticks)</NOW_TICKS>
+
+  <!-- Build番号 = 日数 -->
+  <BUILD_NUMBER>
+    $([System.Int32]::Parse(
+        $([System.Int64]::Parse($(NOW_TICKS)) - [System.Int64]::Parse($(BASE_TICKS))) / 864000000000
+    ))
+  </BUILD_NUMBER>
+
+  <!-- Revision番号 = 当日0:00からの秒数/2 -->
+  <SECONDS_TODAY>$([System.Int32]::Parse($([System.DateTime]::UtcNow.TimeOfDay.TotalSeconds)))</SECONDS_TODAY>
+  <REV_NUMBER>$([System.Int32]::Parse($([System.Math]::Floor($(SECONDS_TODAY) / 2.0).ToString())))</REV_NUMBER>
+</PropertyGroup>
+
+<ItemDefinitionGroup>
+  <ResourceCompile>
+    <PreprocessorDefinitions>
+      VER_MAJOR=1;VER_MINOR=0;VER_BUILD=$(BUILD_NUMBER);VER_REV=$(REV_NUMBER);%(PreprocessorDefinitions)
+    </PreprocessorDefinitions>
+  </ResourceCompile>
+</ItemDefinitionGroup>
+
 
     <!-- C# の AssemblyVersion("1.0.*") と同じ規則 -->
   <PropertyGroup>
