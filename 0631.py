@@ -1,3 +1,12 @@
+
+<PropertyGroup>
+  <!-- Build番号: 年 × 1000 + 日通算（おおよそユニーク）-->
+  <BUILD_NUMBER>$([System.Int32]::Parse($([System.DateTime]::UtcNow.Year)*1000 + $([System.DateTime]::UtcNow.DayOfYear)))</BUILD_NUMBER>
+
+  <!-- Revision番号: 秒/2 -->
+  <REV_NUMBER>$([System.Int32]::Parse($([System.Math]::Floor($([System.DateTime]::UtcNow.Second) / 2.0).ToString())))</REV_NUMBER>
+</PropertyGroup>
+
 <PropertyGroup>
   <!-- 基準日 (2000/01/01) の Ticks -->
   <BASE_TICKS>$([System.DateTime]::Parse("2000-01-01").Ticks)</BASE_TICKS>
