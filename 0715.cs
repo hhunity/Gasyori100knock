@@ -1,4 +1,172 @@
 
+
+#include <opencv2/core.hpp>
+#include <opencv2/cudaarithm.hpp>
+#include <opencv2/cudafilters.hpp>
+#include <opencv2/cudawarping.hpp>
+#include <opencv2/cudacodec.hpp>
+#include <opencv2/cudafft.hpp>       // 一部の環境では不要
+#include <vector>
+#include <iostream>
+
+// pinned メモリで作るヘルパ
+static cv::Mat makePinned32F(const cv::Size& sz) {
+    cv::cuda::HostMem hm(sz, CV_32FC1, cv::cuda::HostMem::PAGE_LOCKED);
+    return hm.createMatHeader();
+}
+
+int main() {
+    // ---- 入力を用意（ここではダミー）----
+    const int num_images = 8;                 // 画像枚数
+    const int num_streams = 4;                // 並列ストリーム本数（GPUと相談して調整）
+    cv::Size sz(2048, 2048);                  // 入力サイズ
+    int dft_flags = cv::DFT_COMPLEX_OUTPUT;   // 実→複素
+
+    // 最適サイズへパディング（任意）
+    cv::Size opt(
+        cv::getOptimalDFTSize(sz.width),
+        cv::getOptimalDFTSize(sz.height)
+    );
+
+    // 入力（pinned）と出力（pinned）を準備
+    std::vector<cv::Mat> h_in(num_images), h_out(num_images);
+    for (int i=0;i<num_images;++i){
+        h_in[i]  = makePinned32F(opt);
+        h_out[i] = makePinned32F(opt);       // 複素でも CV_32FC2 を受けたいなら 2ch Mat 推奨
+        // ダミーデータ
+        cv::randu(h_in[i], 0.f, 1.f);
+    }
+
+    // GPUバッファ
+    std::vector<cv::cuda::GpuMat> d_in(num_images), d_out(num_images);
+
+    // ストリームをプール
+    std::vector<cv::cuda::Stream> streams(num_streams);
+
+    // ---- ウォームアップ（各ストリームで一度だけプラン作成を誘発）----
+    for (int s=0; s<num_streams; ++s) {
+        cv::cuda::Stream& st = streams[s];
+        cv::cuda::GpuMat tmp_in(opt, CV_32FC1), tmp_out(opt, CV_32FC2);
+        tmp_in.setTo(0, st);
+        cv::cuda::dft(tmp_in, tmp_out, opt, dft_flags, /*nonzeroRows=*/0, st);
+    }
+    for (auto& st : streams) st.waitForCompletion();
+
+    // ---- 実ジョブ：各画像をストリームに割り当てて並列 ----
+    for (int i=0; i<num_images; ++i) {
+        auto& st = streams[i % num_streams];
+
+        // 必要なら padCopy（ここでは既に最適サイズ）
+        d_in[i].create(opt, CV_32FC1);
+        d_out[i].create(opt, CV_32FC2);
+
+        // 非同期アップロード → FFT → 非同期ダウンロード
+        d_in[i].upload(h_in[i], st);
+        cv::cuda::dft(d_in[i], d_out[i], opt, dft_flags, 0, st);
+        d_out[i].download(h_out[i], st);
+    }
+
+    // ---- まとめ待ち（wait_all）----
+    for (auto& st : streams) st.waitForCompletion();
+
+    // ここで h_out[] に複素スペクトルが入っています（CV_32FC2 推奨）
+    std::cout << "All FFTs finished.\n";
+    return 0;
+}
+
+#include <opencv2/core.hpp>
+#include <opencv2/cudaarithm.hpp>
+#include <opencv2/cudafilters.hpp>
+#include <opencv2/cudawarping.hpp>
+#include <opencv2/cudacodec.hpp>
+#include <opencv2/cudafft.hpp>       // 一部の環境では不要
+#include <vector>
+#include <iostream>
+
+// pinned メモリで作るヘルパ
+static cv::Mat makePinned32F(const cv::Size& sz) {
+    cv::cuda::HostMem hm(sz, CV_32FC1, cv::cuda::HostMem::PAGE_LOCKED);
+    return hm.createMatHeader();
+}
+
+int main() {
+    // ---- 入力を用意（ここではダミー）----
+    const int num_images = 8;                 // 画像枚数
+    const int num_streams = 4;                // 並列ストリーム本数（GPUと相談して調整）
+    cv::Size sz(2048, 2048);                  // 入力サイズ
+    int dft_flags = cv::DFT_COMPLEX_OUTPUT;   // 実→複素
+
+    // 最適サイズへパディング（任意）
+    cv::Size opt(
+        cv::getOptimalDFTSize(sz.width),
+        cv::getOptimalDFTSize(sz.height)
+    );
+
+    // 入力（pinned）と出力（pinned）を準備
+    std::vector<cv::Mat> h_in(num_images), h_out(num_images);
+    for (int i=0;i<num_images;++i){
+        h_in[i]  = makePinned32F(opt);
+        h_out[i] = makePinned32F(opt);       // 複素でも CV_32FC2 を受けたいなら 2ch Mat 推奨
+        // ダミーデータ
+        cv::randu(h_in[i], 0.f, 1.f);
+    }
+
+    // GPUバッファ
+    std::vector<cv::cuda::GpuMat> d_in(num_images), d_out(num_images);
+
+    // ストリームをプール
+    std::vector<cv::cuda::Stream> streams(num_streams);
+
+    // ---- ウォームアップ（各ストリームで一度だけプラン作成を誘発）----
+    for (int s=0; s<num_streams; ++s) {
+        cv::cuda::Stream& st = streams[s];
+        cv::cuda::GpuMat tmp_in(opt, CV_32FC1), tmp_out(opt, CV_32FC2);
+        tmp_in.setTo(0, st);
+        cv::cuda::dft(tmp_in, tmp_out, opt, dft_flags, /*nonzeroRows=*/0, st);
+    }
+    for (auto& st : streams) st.waitForCompletion();
+
+    // ---- 実ジョブ：各画像をストリームに割り当てて並列 ----
+    for (int i=0; i<num_images; ++i) {
+        auto& st = streams[i % num_streams];
+
+        // 必要なら padCopy（ここでは既に最適サイズ）
+        d_in[i].create(opt, CV_32FC1);
+        d_out[i].create(opt, CV_32FC2);
+
+        // 非同期アップロード → FFT → 非同期ダウンロード
+        d_in[i].upload(h_in[i], st);
+        cv::cuda::dft(d_in[i], d_out[i], opt, dft_flags, 0, st);
+        d_out[i].download(h_out[i], st);
+    }
+
+    // ---- まとめ待ち（wait_all）----
+    for (auto& st : streams) st.waitForCompletion();
+
+    // ここで h_out[] に複素スペクトルが入っています（CV_32FC2 推奨）
+    std::cout << "All FFTs finished.\n";
+    return 0;
+}
+
+struct FftJob {
+    cv::cuda::Stream stream;
+    cv::cuda::Event  done;
+    cv::cuda::GpuMat d_in, d_out;
+    cv::Mat          h_in, h_out;
+};
+
+int wait_any(std::vector<FftJob>& jobs) {
+    while (true) {
+        for (int i=0;i<(int)jobs.size();++i) {
+            if (jobs[i].done.queryIfComplete()) return i; // 完了した index
+        }
+        cv::cuda::DeviceInfo().queryMemory(); // 軽いバックオフ代わり（適宜 sleep でもOK）
+    }
+}
+
+// 使い方：FFT を stream に積んだ直後に e.record(stream) しておく
+// jobs[i].done.record(jobs[i].stream);
+
 using System.IO;
 using System.Windows.Media.Imaging;
 
