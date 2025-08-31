@@ -1,3 +1,16 @@
+// DLL 側 (C++)
+
+extern "C" {
+    typedef void (DLL_CALL *ResultCallback)(
+        int frameId,          // フレーム番号 (gp_submit の引数で渡した ID)
+        const float* data,    // FFT 結果の先頭ポインタ (row 0 の先頭)
+        int width,            // 画像幅 (要素数)
+        int height,           // 画像高さ
+        int stride,           // 1 行あたりのバイト数 (通常 width*sizeof(float))
+        void* user_state      // ユーザデータ (gp_create_ctx で渡したポインタ)
+    );
+}
+
 // 最終結果（回転 + FFT magnitude）をコールバックで返す非同期Submit型
 
 extern "C" {
