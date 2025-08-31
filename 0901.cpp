@@ -235,3 +235,78 @@ GPU_API int GPU_CALL gp_submit(
 }
 
 } // extern "C"
+
+// GpuWrapper.cs
+using System;
+using System.Collections.Concurrent;
+using System.Runtime.InteropServices;
+using System.Threading.Tasks;
+
+internal static class Native {
+    [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
+    public delegate void ResultCallback(int frameId, IntPtr data, int width, int height, int stride, IntPtr user);
+
+    [DllImport("gpu_async", CallingConvention = CallingConvention.Cdecl)]
+    public static extern IntPtr gp_create_ctx(int w, int h, int nbuf, float angleDeg, ResultCallback cb, IntPtr user);
+
+    [DllImport("gpu_async", CallingConvention = CallingConvention.Cdecl)]
+    public static extern void gp_destroy_ctx(IntPtr ctx);
+
+    [DllImport("gpu_async", CallingConvention = CallingConvention.Cdecl)]
+    public static extern int gp_submit(IntPtr ctx, int frameId, IntPtr hostPtr, int pitchBytes);
+}
+
+public sealed class GpuWrapper : IDisposable {
+    private readonly IntPtr _ctx;
+    private readonly Native.ResultCallback _cb; // GC防止
+    private readonly ConcurrentDictionary<int, TaskCompletionSource<Result>> _map = new();
+
+    public record Result(int FrameId, int Width, int Height, int StrideBytes, IntPtr DataPtr);
+
+    public GpuWrapper(int w, int h, int nbuf, float angleDeg){
+        _cb = OnResult;
+        _ctx = Native.gp_create_ctx(w, h, nbuf, angleDeg, _cb, IntPtr.Zero);
+        if (_ctx == IntPtr.Zero) throw new InvalidOperationException("gp_create_ctx failed");
+    }
+
+    public void Dispose(){
+        Native.gp_destroy_ctx(_ctx);
+    }
+
+    public unsafe Task<Result> EnqueueAsync(byte[] frame8u, int pitchBytes, int frameId){
+        var tcs = new TaskCompletionSource<Result>(TaskCreationOptions.RunContinuationsAsynchronously);
+        if (!_map.TryAdd(frameId, tcs))
+            throw new InvalidOperationException("duplicated frameId");
+        fixed (byte* p = frame8u){
+            int rc = Native.gp_submit(_ctx, frameId, (IntPtr)p, pitchBytes);
+            if (rc != 0){
+                _map.TryRemove(frameId, out _);
+                tcs.SetException(new Exception($"gp_submit failed rc={rc}"));
+            }
+        }
+        return tcs.Task;
+    }
+
+    // コールバックは DLL のワーカースレッドから呼ばれる
+    private void OnResult(int frameId, IntPtr data, int w, int h, int stride, IntPtr user){
+        if (_map.TryRemove(frameId, out var tcs)){
+            tcs.SetResult(new Result(frameId, w, h, stride, data));
+        }
+    }
+}
+
+// 例: 回転後の結果を受け取り、CPU側スレッドプールでFFT（Task.Run）を並列化
+var gpu = new GpuWrapper(width:1024, height:768, nbuf:3, angleDeg:17f);
+
+for (int f=0; f<1000; ++f){
+    byte[] frame = AcquireFrameIntoByteArraySomehow(); // 8UC1 (pitch=width)
+    var task = gpu.EnqueueAsync(frame, pitchBytes:1024, frameId:f);
+
+    _ = task.ContinueWith(t => {
+        var res = t.Result;
+        // res.DataPtr は回転後 float32 の先頭。必要なら managed コピーしてFFTへ。
+        // ここでは例として Task.Run で並列FFTに
+        return Task.Run(() => CpuFft(res));
+    }).Unwrap();
+}
+
