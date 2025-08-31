@@ -1,3 +1,131 @@
+
+// gpu_sync.cpp (抜粋)
+struct Job {
+    int slot = -1;
+    // 出力先（呼び出し元のバッファ）と通知
+    float* outPtr = nullptr; int outPitch = 0;
+    std::promise<void> done;
+};
+
+struct Slot {
+    int id = -1;
+    // Host pinned
+    cv::cuda::HostMem pin_in, pin_out;
+    cv::Mat in_mat, out_mat;
+    // Device
+    cv::cuda::GpuMat d_in, d_out;
+    // Events
+    cudaEvent_t evH2D=nullptr, evK=nullptr, evD2H=nullptr;
+    // ジョブ紐付け
+    Job* job = nullptr;
+};
+
+struct GpuCtx {
+    int W=0,H=0,N=0;
+    cv::Mat rotM;
+    std::vector<Slot> slots;
+
+    // streams
+    cv::cuda::Stream sH2D, sK, sD2H;
+
+    // ワーカー
+    std::thread worker;
+    std::mutex muQ;
+    std::condition_variable cvQ;
+    std::queue<Job*> qJobs;
+    bool stop=false;
+};
+
+// 同期API
+int gp_process_sync(GpuCtx* ctx, const uint8_t* inPtr, int inPitch, float* outPtr, int outPitch)
+{
+    if (!ctx || !inPtr || !outPtr) return -1;
+
+    // 空きslotを取得（簡易：線形探索）
+    int slot = -1;
+    for (int i=0;i<ctx->N;++i){ if (ctx->slots[i].id < 0){ slot = i; break; } }
+    if (slot < 0) return -2; // 全部in-flight（満杯）
+
+    auto& s = ctx->slots[slot];
+    s.id = 1; // 使用中マーク
+
+    // 入力を即時コピー（呼び出し元バッファの寿命に依存しない）
+    for (int y=0;y<ctx->H;++y)
+        memcpy(s.in_mat.ptr(y), inPtr + y*inPitch, ctx->W);
+
+    // ジョブを作ってキューへ
+    auto job = new Job();
+    job->slot = slot; job->outPtr = outPtr; job->outPitch = outPitch;
+
+    {
+        std::lock_guard<std::mutex> lk(ctx->muQ);
+        ctx->qJobs.push(job);
+    }
+    ctx->cvQ.notify_one();
+
+    // ここで“自分のジョブだけ”待つ（GPUはDLL内の1スレッドが処理）
+    job->done.get_future().wait();
+    delete job;
+    return 0;
+}
+
+// ワーカースレッドのループ（概念）
+void worker_loop(GpuCtx* ctx){
+    auto& sH2D=ctx->sH2D; auto& sK=ctx->sK; auto& sD2H=ctx->sD2H;
+    std::vector<int> inflight; inflight.reserve(ctx->N);
+
+    while(true){
+        // 1) 取れるだけ取り、ストリームに投下
+        Job* j=nullptr;
+        {
+            std::unique_lock<std::mutex> lk(ctx->muQ);
+            ctx->cvQ.wait(lk, [&]{ return ctx->stop || !ctx->qJobs.empty() || !inflight.empty(); });
+            if (ctx->stop && ctx->qJobs.empty() && inflight.empty()) break;
+            if (!ctx->qJobs.empty() && (int)inflight.size() < ctx->N) {
+                j = ctx->qJobs.front(); ctx->qJobs.pop();
+            }
+        }
+        if (j){
+            auto& s = ctx->slots[j->slot];
+            s.job = j;
+
+            // H2D
+            s.d_in.upload(s.in_mat, sH2D);
+            cudaEventRecord(s.evH2D, cv::cuda::StreamAccessor::getStream(sH2D));
+            // K
+            sK.waitEvent(s.evH2D);
+            cv::cuda::warpAffine(s.d_in, s.d_out, ctx->rotM, s.d_out.size(),
+                                 cv::INTER_LINEAR, cv::BORDER_CONSTANT, cv::Scalar(0), sK);
+            cudaEventRecord(s.evK, cv::cuda::StreamAccessor::getStream(sK));
+            // D2H
+            sD2H.waitEvent(s.evK);
+            s.d_out.download(s.out_mat, sD2H);
+            cudaEventRecord(s.evD2H, cv::cuda::StreamAccessor::getStream(sD2H));
+
+            inflight.push_back(j->slot);
+        }
+
+        // 2) 完了したものだけ返す（複数フレームをオーバーラップ）
+        for (int i=(int)inflight.size()-1; i>=0; --i){
+            int sl = inflight[i];
+            auto& s = ctx->slots[sl];
+            if (cudaEventQuery(s.evD2H) == cudaSuccess){
+                // 呼び出し側バッファへコピー（float）
+                for (int y=0;y<ctx->H;++y)
+                    memcpy((uint8_t*)s.job->outPtr + y*s.job->outPitch, s.out_mat.ptr(y), ctx->W*sizeof(float));
+                s.job->done.set_value();  // 同期呼び出しを起こしたスレッドを解放
+                s.id = -1; s.job = nullptr;
+                inflight.erase(inflight.begin()+i);
+            }
+        }
+        // ほんの少しゆっくり（CPU100%回避）
+        std::this_thread::sleep_for(std::chrono::microseconds(50));
+    }
+}
+
+
+############
+
 // gpu_async.h
 #pragma once
 #include <cstdint>
