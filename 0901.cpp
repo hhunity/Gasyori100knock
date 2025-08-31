@@ -1,3 +1,255 @@
+#pragma once
+#include <cstdint>
+
+#ifdef _WIN32
+  #ifdef GPUSYNC_EXPORTS
+    #define GPU_API __declspec(dllexport)
+  #else
+    #define GPU_API __declspec(dllimport)
+  #endif
+  #define GPU_CALL __cdecl
+#else
+  #define GPU_API
+  #define GPU_CALL
+#endif
+
+extern "C" {
+
+// コンテキストハンドル
+typedef struct GpuCtx GpuCtx;
+
+// 初期化
+GPU_API GpuCtx* GPU_CALL gp_create_ctx(int width, int height, int nbuf, float angle_deg);
+
+// 破棄
+GPU_API void GPU_CALL gp_destroy_ctx(GpuCtx*);
+
+// 同期API：呼んだスレッドは自分のジョブが終わるまで待つ
+// inPtr : 入力 8UC1, inPitchBytes: 入力ピッチ
+// outPtr: 出力 float32, outPitchBytes: 出力ピッチ
+GPU_API int GPU_CALL gp_process_sync(
+    GpuCtx* ctx,
+    const uint8_t* inPtr, int inPitchBytes,
+    float* outPtr, int outPitchBytes);
+
+}
+
+#define GPUSYNC_EXPORTS
+#include "gpu_sync.h"
+
+#include <opencv2/core.hpp>
+#include <opencv2/cudawarping.hpp>
+#include <opencv2/core/cuda.hpp>
+
+#include <thread>
+#include <mutex>
+#include <queue>
+#include <condition_variable>
+#include <future>
+
+struct Job {
+    int slot = -1;
+    float* outPtr = nullptr;
+    int outPitch = 0;
+    std::promise<void> done;
+};
+
+struct Slot {
+    int id = -1;
+    cv::cuda::HostMem pin_in, pin_out;
+    cv::Mat in_mat, out_mat;
+    cv::cuda::GpuMat d_in, d_out;
+    cudaEvent_t evH2D=nullptr, evK=nullptr, evD2H=nullptr;
+    Job* job=nullptr;
+};
+
+struct GpuCtx {
+    int W=0, H=0, N=0;
+    cv::Mat rotM;
+    std::vector<Slot> slots;
+    cv::cuda::Stream sH2D, sK, sD2H;
+
+    std::thread worker;
+    std::mutex muQ;
+    std::condition_variable cvQ;
+    std::queue<Job*> qJobs;
+    bool stop=false;
+};
+
+static void make_hostmat(cv::cuda::HostMem& hm, int rows, int cols, int type, cv::Mat& header){
+    hm.release();
+    hm = cv::cuda::HostMem(rows, cols, type, cv::cuda::HostMem::PAGE_LOCKED);
+    header = hm.createMatHeader();
+}
+
+static void worker_loop(GpuCtx* ctx){
+    auto& sH2D=ctx->sH2D; auto& sK=ctx->sK; auto& sD2H=ctx->sD2H;
+    std::vector<int> inflight; inflight.reserve(ctx->N);
+
+    while(true){
+        Job* j=nullptr;
+        {
+            std::unique_lock<std::mutex> lk(ctx->muQ);
+            ctx->cvQ.wait(lk, [&]{ return ctx->stop || !ctx->qJobs.empty() || !inflight.empty(); });
+            if (ctx->stop && ctx->qJobs.empty() && inflight.empty()) break;
+            if (!ctx->qJobs.empty() && (int)inflight.size() < ctx->N) {
+                j = ctx->qJobs.front(); ctx->qJobs.pop();
+            }
+        }
+        if (j){
+            auto& s = ctx->slots[j->slot];
+            s.job = j;
+
+            // H2D
+            s.d_in.upload(s.in_mat, sH2D);
+            cudaEventRecord(s.evH2D, cv::cuda::StreamAccessor::getStream(sH2D));
+            // Kernel
+            sK.waitEvent(s.evH2D);
+            cv::cuda::warpAffine(s.d_in, s.d_out, ctx->rotM, s.d_out.size(),
+                                 cv::INTER_LINEAR, cv::BORDER_CONSTANT, cv::Scalar(0), sK);
+            cudaEventRecord(s.evK, cv::cuda::StreamAccessor::getStream(sK));
+            // D2H
+            sD2H.waitEvent(s.evK);
+            s.d_out.download(s.out_mat, sD2H);
+            cudaEventRecord(s.evD2H, cv::cuda::StreamAccessor::getStream(sD2H));
+
+            inflight.push_back(j->slot);
+        }
+
+        // 完了したものを処理
+        for (int i=(int)inflight.size()-1; i>=0; --i){
+            int sl = inflight[i];
+            auto& s = ctx->slots[sl];
+            if (cudaEventQuery(s.evD2H) == cudaSuccess){
+                // 出力コピー
+                for (int y=0;y<ctx->H;++y){
+                    memcpy((uint8_t*)s.job->outPtr + y*s.job->outPitch,
+                           s.out_mat.ptr(y),
+                           ctx->W*sizeof(float));
+                }
+                s.job->done.set_value(); // 呼び出しスレッドを解放
+                s.id = -1; s.job=nullptr;
+                inflight.erase(inflight.begin()+i);
+            }
+        }
+        std::this_thread::sleep_for(std::chrono::microseconds(50));
+    }
+}
+
+extern "C" {
+
+GPU_API GpuCtx* GPU_CALL gp_create_ctx(int width, int height, int nbuf, float angle_deg){
+    if (nbuf < 2) nbuf=2;
+    auto ctx = new GpuCtx();
+    ctx->W=width; ctx->H=height; ctx->N=nbuf;
+
+    cv::Point2f c(width/2.f, height/2.f);
+    ctx->rotM = cv::getRotationMatrix2D(c, angle_deg, 1.0);
+
+    ctx->slots.resize(nbuf);
+    for (int i=0;i<nbuf;++i){
+        auto& s=ctx->slots[i];
+        make_hostmat(s.pin_in,  height, width, CV_8UC1,  s.in_mat);
+        make_hostmat(s.pin_out, height, width, CV_32FC1, s.out_mat);
+        s.d_in.create(height, width, CV_8UC1);
+        s.d_out.create(height, width, CV_32FC1);
+        cudaEventCreateWithFlags(&s.evH2D, cudaEventDisableTiming);
+        cudaEventCreateWithFlags(&s.evK,   cudaEventDisableTiming);
+        cudaEventCreateWithFlags(&s.evD2H, cudaEventDisableTiming);
+    }
+    ctx->worker = std::thread(worker_loop, ctx);
+    return ctx;
+}
+
+GPU_API void GPU_CALL gp_destroy_ctx(GpuCtx* ctx){
+    if (!ctx) return;
+    {
+        std::lock_guard<std::mutex> lk(ctx->muQ);
+        ctx->stop=true;
+    }
+    ctx->cvQ.notify_all();
+    if (ctx->worker.joinable()) ctx->worker.join();
+    for (auto& s: ctx->slots){
+        if (s.evH2D) cudaEventDestroy(s.evH2D);
+        if (s.evK)   cudaEventDestroy(s.evK);
+        if (s.evD2H) cudaEventDestroy(s.evD2H);
+    }
+    delete ctx;
+}
+
+GPU_API int GPU_CALL gp_process_sync(GpuCtx* ctx,
+    const uint8_t* inPtr, int inPitch, float* outPtr, int outPitch)
+{
+    if (!ctx || !inPtr || !outPtr) return -1;
+    int slot=-1;
+    for (int i=0;i<ctx->N;++i){
+        if (ctx->slots[i].id<0){ slot=i; break; }
+    }
+    if (slot<0) return -2;
+
+    auto& s = ctx->slots[slot];
+    s.id=1;
+    for (int y=0;y<ctx->H;++y)
+        memcpy(s.in_mat.ptr(y), inPtr+y*inPitch, ctx->W);
+
+    auto job=new Job();
+    job->slot=slot; job->outPtr=outPtr; job->outPitch=outPitch;
+    {
+        std::lock_guard<std::mutex> lk(ctx->muQ);
+        ctx->qJobs.push(job);
+    }
+    ctx->cvQ.notify_one();
+
+    job->done.get_future().wait(); // 同期待ち
+    delete job;
+    return 0;
+}
+
+} // extern "C"
+
+using System;
+using System.Threading.Tasks;
+using System.Runtime.InteropServices;
+
+class Program {
+    static class Native {
+        [DllImport("gpu_sync.dll", CallingConvention = CallingConvention.Cdecl)]
+        public static extern IntPtr gp_create_ctx(int w, int h, int nbuf, float angle);
+        [DllImport("gpu_sync.dll", CallingConvention = CallingConvention.Cdecl)]
+        public static extern void gp_destroy_ctx(IntPtr ctx);
+        [DllImport("gpu_sync.dll", CallingConvention = CallingConvention.Cdecl)]
+        public static extern int gp_process_sync(IntPtr ctx,
+            IntPtr inPtr, int inPitch, IntPtr outPtr, int outPitch);
+    }
+
+    static void Main() {
+        int W=1024, H=768;
+        IntPtr ctx = Native.gp_create_ctx(W,H,3,17.0f);
+
+        var po = new ParallelOptions { MaxDegreeOfParallelism=2 };
+        Parallel.For(0,100, po, f=>{
+            byte[] input = new byte[W*H];
+            float[] output = new float[W*H];
+            unsafe {
+                fixed(byte* pIn=input)
+                fixed(float* pOut=output) {
+                    int rc=Native.gp_process_sync(ctx,
+                        (IntPtr)pIn, W,
+                        (IntPtr)pOut, W*sizeof(float));
+                    if(rc!=0) throw new Exception($"rc={rc}");
+                }
+            }
+            // ここでCPU FFTや次段処理
+            Console.WriteLine($"Frame {f} done");
+        });
+
+        Native.gp_destroy_ctx(ctx);
+    }
+}
+
+
+
+##############
 
 // gpu_sync.cpp (抜粋)
 struct Job {
