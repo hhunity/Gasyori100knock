@@ -1,3 +1,134 @@
+// ==== GpuCtx に追加 ====
+struct GpuCtx {
+    ...
+    // スロット管理（空き番号だけを保持）
+    std::mutex muSlots;
+    std::condition_variable cvSlots;
+    std::queue<int> freeSlots;   // 空きslot番号
+    bool quitting = false;       // 破棄フラグ
+    ...
+};
+
+// ==== gp_create_ctx で初期化 ====
+for (int i=0;i<nbuf;++i){
+    auto& s = ctx->slots[i];
+    s.id = -1;
+    ...
+    ctx->freeSlots.push(i);     // ★ 最初は全部空き
+}
+
+
+// ==== 完了時（workerの最後）で返却する部分 ====
+// sl.id = -1; の直後に
+{
+    std::lock_guard<std::mutex> lk(ctx->muSlots);
+    ctx->slots[j.slot].id = -1;
+    ctx->freeSlots.push(j.slot);     // ★ 空きを返却
+}
+ctx->cvSlots.notify_one();            // ★ 待っている submit を起こす
+
+extern "C" DLL_EXPORT int DLL_CALL
+gp_submit_try(GpuCtx* ctx, int frameId, const uint8_t* src, int pitch, void* user)
+{
+    if (!ctx || !src) return -1;
+    int slot = -1;
+
+    // 空きを“試しに”取る（ブロックしない）
+    {
+        std::lock_guard<std::mutex> lk(ctx->muSlots);
+        if (ctx->freeSlots.empty()) return -2;    // ★ 満杯
+        slot = ctx->freeSlots.front();
+        ctx->freeSlots.pop();
+        ctx->slots[slot].id = -2;                 // ★ 予約マーク
+    }
+
+    // Pinned へ即コピー（寿命から解放）
+    auto& s = ctx->slots[slot];
+    for (int y=0; y<ctx->H; ++y)
+        std::memcpy(s.in_mat.ptr(y), src + y*pitch, ctx->W);
+
+    // Job投入
+    Job j; j.frame_id = frameId; j.slot = slot; j.user = user;
+    {
+        std::lock_guard<std::mutex> lk(ctx->mu);
+        ctx->jq.push(j);
+    }
+    ctx->cv.notify_one();
+    return 0;
+}
+
+extern "C" DLL_EXPORT int DLL_CALL
+gp_submit_wait(GpuCtx* ctx, int frameId, const uint8_t* src, int pitch, void* user, int timeout_ms)
+{
+    if (!ctx || !src) return -1;
+
+    int slot = -1;
+    {
+        std::unique_lock<std::mutex> lk(ctx->muSlots);
+
+        auto pred = [&]{ return ctx->quitting || !ctx->freeSlots.empty(); };
+
+        if (timeout_ms <= 0) {
+            // 無期限で待つ
+            ctx->cvSlots.wait(lk, pred);
+            if (ctx->quitting) return -3; // 破棄中
+        } else {
+            // タイムアウト付き
+            if (!ctx->cvSlots.wait_for(lk, std::chrono::milliseconds(timeout_ms), pred))
+                return -2; // ★ タイムアウト（空かなかった）
+            if (ctx->quitting) return -3;
+        }
+
+        // 空きスロット取得＆予約
+        slot = ctx->freeSlots.front();
+        ctx->freeSlots.pop();
+        ctx->slots[slot].id = -2;   // 予約
+    }
+
+    // 入力コピー
+    auto& s = ctx->slots[slot];
+    for (int y=0; y<ctx->H; ++y)
+        std::memcpy(s.in_mat.ptr(y), src + y*pitch, ctx->W);
+
+    // ジョブ投入
+    Job j; j.frame_id = frameId; j.slot = slot; j.user = user;
+    {
+        std::lock_guard<std::mutex> lk(ctx->mu);
+        ctx->jq.push(j);
+    }
+    ctx->cv.notify_one();
+    return 0;
+}
+
+DLL_EXPORT void DLL_CALL gp_destroy_ctx(GpuCtx* ctx){
+    if (!ctx) return;
+    {
+        // worker 側
+        std::lock_guard<std::mutex> lk(ctx->mu);
+        ctx->quit = true;
+    }
+    ctx->cv.notify_all();
+
+    {
+        // submit 側（待機中）を起こす
+        std::lock_guard<std::mutex> lk(ctx->muSlots);
+        ctx->quitting = true;
+    }
+    ctx->cvSlots.notify_all();
+
+    if (ctx->worker.joinable()) ctx->worker.join();
+    ...
+}
+
+
+
+
+
+
+
+
+
+
 #pragma once
 #include <cstdint>
 
