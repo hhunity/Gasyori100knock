@@ -1,0 +1,371 @@
+// gpu_async_fftpool.cpp  — ① 非同期Submit + DLL内 FFT専用スレッドプール + 最終結果コールバック
+// ビルド例: cl /O2 /MD /EHsc /LD gpu_async_fftpool.cpp /I<opencv\include> <opencv libs...>
+
+#include <opencv2/core.hpp>
+#include <opencv2/imgproc.hpp>
+#include <opencv2/core/cuda.hpp>
+#include <opencv2/cudawarping.hpp>
+
+#include <atomic>
+#include <condition_variable>
+#include <cstdint>
+#include <cstring>
+#include <functional>
+#include <mutex>
+#include <queue>
+#include <thread>
+#include <vector>
+
+#ifdef _WIN32
+  #define DLL_EXPORT __declspec(dllexport)
+  #define DLL_CALL   __cdecl
+#else
+  #define DLL_EXPORT
+  #define DLL_CALL
+#endif
+
+extern "C" {
+// 最終結果（回転→FFTのmagnitude）だけを返す
+typedef void (DLL_CALL *ResultCallback)(
+    int frameId,
+    const float* data,   // 先頭ポインタ（row0）
+    int width, int height,
+    int strideBytes,     // 1行のバイト数（= width*sizeof(float) が基本）
+    void* user           // gp_submit_* の引数 user をそのまま返す
+);
+
+// 不透明ハンドル
+struct GpuCtx;
+
+// コンテキスト作成/破棄
+DLL_EXPORT GpuCtx* DLL_CALL gp_create_ctx(int width, int height, int nbuf,
+                                          float angle_deg,
+                                          ResultCallback cb, void* user_global);
+DLL_EXPORT void    DLL_CALL gp_destroy_ctx(GpuCtx* ctx);
+
+// 非ブロッキング: 空きが無ければ -2
+DLL_EXPORT int     DLL_CALL gp_submit_try (GpuCtx* ctx, int frameId,
+                                           const uint8_t* src, int pitchBytes,
+                                           void* user_per_job);
+
+// ブロッキング: 空きを待つ。timeout_ms<=0 なら無期限。タイムアウトで -2
+DLL_EXPORT int     DLL_CALL gp_submit_wait(GpuCtx* ctx, int frameId,
+                                           const uint8_t* src, int pitchBytes,
+                                           void* user_per_job, int timeout_ms);
+} // extern "C"
+
+//================ 内部実装 =================//
+
+// ---- 簡易固定スレッドプール（FFT用） ----
+class ThreadPool {
+public:
+    explicit ThreadPool(size_t n){ start(n); }
+    ~ThreadPool(){ stop(); }
+
+    template<class F>
+    void submit(F&& f){
+        {
+            std::lock_guard<std::mutex> lk(mu_);
+            q_.emplace(std::function<void()>(std::forward<F>(f)));
+        }
+        cv_.notify_one();
+    }
+
+private:
+    void start(size_t n){
+        if (n<1) n=1;
+        for(size_t i=0;i<n;++i){
+            ws_.emplace_back([this]{
+                for(;;){
+                    std::function<void()> job;
+                    {
+                        std::unique_lock<std::mutex> lk(mu_);
+                        cv_.wait(lk,[&]{ return stop_ || !q_.empty(); });
+                        if (stop_ && q_.empty()) return;
+                        job = std::move(q_.front()); q_.pop();
+                    }
+                    try { job(); } catch(...) { /* log等 */ }
+                }
+            });
+        }
+    }
+    void stop(){
+        { std::lock_guard<std::mutex> lk(mu_); stop_=true; }
+        cv_.notify_all();
+        for (auto& t: ws_) if (t.joinable()) t.join();
+    }
+
+    std::vector<std::thread> ws_;
+    std::queue<std::function<void()>> q_;
+    std::mutex mu_; std::condition_variable cv_;
+    bool stop_ = false;
+};
+
+// ---- Job / Slot ----
+struct Job {
+    int frame_id;
+    int slot;
+    void* user; // per-submit の user
+};
+
+struct Slot {
+    int id = -1; // -1:空き, -2:予約, >=0:frameId（使用中）
+
+    // ホスト(Pinned) と GPU
+    cv::cuda::HostMem pin_in, pin_rot;
+    cv::Mat in_mat, rot_mat;          // rot_mat: 回転後 float32 1ch
+    cv::cuda::GpuMat d_in, d_rot;
+
+    // CUDA Events
+    cudaEvent_t evH2D=nullptr, evK=nullptr, evD2H=nullptr;
+
+    // FFTワーク
+    cv::Mat fft_complex, fft_mag;     // CV_32FC2 / CV_32FC1
+};
+
+// ---- コンテキスト ----
+struct GpuCtx {
+    int W=0, H=0, N=0;
+    cv::Mat rotM;
+    std::vector<Slot> slots;
+
+    // 単一のロック/条件変数（シンプル派）
+    std::mutex mu;
+    std::condition_variable cv;
+
+    // スロット空き管理 & ジョブキュー
+    std::queue<int> freeSlots;   // 空きslot番号
+    std::queue<Job> jobQueue;    // GPUワーカー行き
+
+    // 終了フラグ／ワーカー
+    bool quitting = false;
+    std::thread gpuWorker;
+
+    // CUDA ストリーム
+    cv::cuda::Stream sH2D, sK, sD2H;
+
+    // FFT 専用スレッドプール
+    std::unique_ptr<ThreadPool> fftPool;
+
+    // コールバック
+    ResultCallback cb = nullptr;
+    void* user_global = nullptr;
+};
+
+// ---- ヘルパ ----
+static void make_hostmat(cv::cuda::HostMem& hm, int h, int w, int type, cv::Mat& header){
+    hm.release();
+    hm = cv::cuda::HostMem(h, w, type, cv::cuda::HostMem::PAGE_LOCKED);
+    header = hm.createMatHeader();
+}
+
+// ---- GPUワーカー ----
+static void gpu_worker_loop(GpuCtx* ctx){
+    auto& sH2D = ctx->sH2D;
+    auto& sK   = ctx->sK;
+    auto& sD2H = ctx->sD2H;
+
+    while (true){
+        Job j;
+        {
+            std::unique_lock<std::mutex> lk(ctx->mu);
+            ctx->cv.wait(lk, [&]{ return ctx->quitting || !ctx->jobQueue.empty(); });
+            if (ctx->quitting && ctx->jobQueue.empty()) break;
+            j = ctx->jobQueue.front(); ctx->jobQueue.pop();
+        }
+
+        // ここからは slot を専有
+        auto& sl = ctx->slots[j.slot];
+        sl.id = j.frame_id; // 予約(-2) → 実使用(frameId)
+
+        // 1) H2D
+        sl.d_in.upload(sl.in_mat, sH2D);
+        cudaEventRecord(sl.evH2D, cv::cuda::StreamAccessor::getStream(sH2D));
+
+        // 2) 回転（H2Dに依存）
+        sK.waitEvent(sl.evH2D);
+        cv::cuda::warpAffine(sl.d_in, sl.d_rot, ctx->rotM, sl.d_rot.size(),
+                             cv::INTER_LINEAR, cv::BORDER_CONSTANT, cv::Scalar(0), sK);
+        cudaEventRecord(sl.evK, cv::cuda::StreamAccessor::getStream(sK));
+
+        // 3) D2H（Kernelに依存）
+        sD2H.waitEvent(sl.evK);
+        sl.d_rot.download(sl.rot_mat, sD2H);
+        cudaEventRecord(sl.evD2H, cv::cuda::StreamAccessor::getStream(sD2H));
+
+        // D2H 完了を同期（ここで GPU は手離れ）
+        cudaEventSynchronize(sl.evD2H);
+
+        // 4) FFT は“プールへ投げる” → GPUワーカーは即次ジョブへ
+        GpuCtx* ctx2 = ctx;
+        int slot_idx = j.slot;
+        int fid = j.frame_id;
+        void* user = j.user;
+
+        ctx->fftPool->submit([ctx2, slot_idx, fid, user]{
+            auto& s = ctx2->slots[slot_idx];
+
+            // （任意）過剰並列回避：OpenCV内部スレッドをOFF
+            // cv::setNumThreads(1);
+
+            // FFT（複素）→ magnitude
+            cv::dft(s.rot_mat, s.fft_complex, cv::DFT_COMPLEX_OUTPUT);
+            cv::Mat planes[2];
+            cv::split(s.fft_complex, planes);
+            cv::magnitude(planes[0], planes[1], s.fft_mag); // CV_32FC1
+
+            // コールバック（最終結果のみ）
+            if (ctx2->cb){
+                ctx2->cb(fid,
+                         reinterpret_cast<const float*>(s.fft_mag.ptr()),
+                         ctx2->W, ctx2->H,
+                         static_cast<int>(s.fft_mag.step),
+                         user ? user : ctx2->user_global);
+            }
+
+            // スロット解放 → 空き通知
+            {
+                std::lock_guard<std::mutex> lk(ctx2->mu);
+                s.id = -1;
+                ctx2->freeSlots.push(slot_idx);
+            }
+            ctx2->cv.notify_all();
+        });
+    }
+}
+
+//================ 公開API =================//
+
+extern "C" {
+
+DLL_EXPORT GpuCtx* DLL_CALL gp_create_ctx(int width, int height, int nbuf,
+                                          float angle_deg,
+                                          ResultCallback cb, void* user_global)
+{
+    if (nbuf < 2) nbuf = 2;
+
+    auto ctx = new GpuCtx();
+    ctx->W = width; ctx->H = height; ctx->N = nbuf;
+    ctx->cb = cb; ctx->user_global = user_global;
+
+    // 回転行列
+    cv::Point2f c(width/2.f, height/2.f);
+    ctx->rotM = cv::getRotationMatrix2D(c, angle_deg, 1.0);
+
+    // スロット確保（Pinned/GPU/Events）
+    ctx->slots.resize(nbuf);
+    for (int i=0;i<nbuf;++i){
+        auto& s = ctx->slots[i];
+        s.id = -1;
+        make_hostmat(s.pin_in,  height, width, CV_8UC1,  s.in_mat);
+        make_hostmat(s.pin_rot, height, width, CV_32FC1, s.rot_mat);
+        s.d_in .create(height, width, CV_8UC1);
+        s.d_rot.create(height, width, CV_32FC1);
+        cudaEventCreateWithFlags(&s.evH2D, cudaEventDisableTiming);
+        cudaEventCreateWithFlags(&s.evK,   cudaEventDisableTiming);
+        cudaEventCreateWithFlags(&s.evD2H, cudaEventDisableTiming);
+
+        ctx->freeSlots.push(i); // 全部空き
+    }
+
+    // FFT プール起動（物理コアに合わせ調整）
+    unsigned hw = std::max(1u, std::thread::hardware_concurrency());
+    unsigned nfft = std::max(2u, hw/2); // まずは物理コアの半分
+    ctx->fftPool = std::make_unique<ThreadPool>(nfft);
+
+    // GPUワーカー起動（1本でOK：複数ストリームで重ねる）
+    ctx->gpuWorker = std::thread(gpu_worker_loop, ctx);
+    return ctx;
+}
+
+DLL_EXPORT void DLL_CALL gp_destroy_ctx(GpuCtx* ctx){
+    if (!ctx) return;
+
+    // submit待ち/worker待ちを起こす
+    {
+        std::lock_guard<std::mutex> lk(ctx->mu);
+        ctx->quitting = true;
+    }
+    ctx->cv.notify_all();
+
+    if (ctx->gpuWorker.joinable()) ctx->gpuWorker.join();
+
+    // FFTプール停止
+    ctx->fftPool.reset();
+
+    // CUDAリソース解放
+    for (auto& s : ctx->slots){
+        if (s.evH2D) cudaEventDestroy(s.evH2D);
+        if (s.evK)   cudaEventDestroy(s.evK);
+        if (s.evD2H) cudaEventDestroy(s.evD2H);
+    }
+    delete ctx;
+}
+
+// 非ブロッキング（空き無しなら -2）
+DLL_EXPORT int DLL_CALL gp_submit_try(GpuCtx* ctx, int frameId,
+                                      const uint8_t* src, int pitchBytes,
+                                      void* user_per_job)
+{
+    if (!ctx || !src) return -1;
+
+    int slot = -1;
+    {
+        std::lock_guard<std::mutex> lk(ctx->mu);
+        if (ctx->freeSlots.empty()) return -2;
+        slot = ctx->freeSlots.front(); ctx->freeSlots.pop();
+        ctx->slots[slot].id = -2; // 予約
+    }
+
+    // 入力を Pinned に即コピー（呼び出し側寿命から解放）
+    auto& s = ctx->slots[slot];
+    for (int y=0; y<ctx->H; ++y){
+        std::memcpy(s.in_mat.ptr(y), src + y*pitchBytes, ctx->W);
+    }
+
+    // Job をキューへ → worker 起こす
+    {
+        std::lock_guard<std::mutex> lk(ctx->mu);
+        ctx->jobQueue.push(Job{frameId, slot, user_per_job});
+    }
+    ctx->cv.notify_all();
+    return 0;
+}
+
+// ブロッキング（空きが出るまで待つ／タイムアウトあり）
+DLL_EXPORT int DLL_CALL gp_submit_wait(GpuCtx* ctx, int frameId,
+                                       const uint8_t* src, int pitchBytes,
+                                       void* user_per_job, int timeout_ms)
+{
+    if (!ctx || !src) return -1;
+
+    int slot = -1;
+    {
+        std::unique_lock<std::mutex> lk(ctx->mu);
+        auto pred = [&]{ return ctx->quitting || !ctx->freeSlots.empty(); };
+        if (timeout_ms <= 0) {
+            ctx->cv.wait(lk, pred);
+            if (ctx->quitting) return -3;
+        } else {
+            if (!ctx->cv.wait_for(lk, std::chrono::milliseconds(timeout_ms), pred))
+                return -2; // タイムアウト
+            if (ctx->quitting) return -3;
+        }
+        slot = ctx->freeSlots.front(); ctx->freeSlots.pop();
+        ctx->slots[slot].id = -2; // 予約
+    }
+
+    auto& s = ctx->slots[slot];
+    for (int y=0; y<ctx->H; ++y){
+        std::memcpy(s.in_mat.ptr(y), src + y*pitchBytes, ctx->W);
+    }
+
+    {
+        std::lock_guard<std::mutex> lk(ctx->mu);
+        ctx->jobQueue.push(Job{frameId, slot, user_per_job});
+    }
+    ctx->cv.notify_all();
+    return 0;
+}
+
+} // extern "C"
