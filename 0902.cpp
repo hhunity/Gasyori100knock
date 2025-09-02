@@ -1,3 +1,58 @@
+
+using System;
+using System.Runtime.InteropServices;
+
+internal static class NvtxEx
+{
+    [StructLayout(LayoutKind.Sequential)]
+    private struct nvtxEventAttributes_t
+    {
+        public ushort version;
+        public ushort size;
+        public int category;
+        public int colorType;
+        public uint color;
+        public int messageType;
+        public IntPtr message;
+    }
+
+    [DllImport("nvToolsExt64_1.dll", CallingConvention = CallingConvention.Cdecl)]
+    private static extern ulong nvtxRangeStartEx(ref nvtxEventAttributes_t attr);
+
+    [DllImport("nvToolsExt64_1.dll", CallingConvention = CallingConvention.Cdecl)]
+    private static extern void nvtxRangeEnd(ulong id);
+
+    public static ulong Begin(string name, int cat = 0, uint argb = 0xFF80C0FF)
+    {
+        var bytes = System.Text.Encoding.ASCII.GetBytes(name + "\0");
+        var handle = GCHandle.Alloc(bytes, GCHandleType.Pinned);
+        try
+        {
+            var attr = new nvtxEventAttributes_t
+            {
+                version = 1,
+                size = (ushort)Marshal.SizeOf<nvtxEventAttributes_t>(),
+                category = cat,
+                colorType = 1,
+                color = argb,
+                messageType = 1,
+                message = handle.AddrOfPinnedObject()
+            };
+            return nvtxRangeStartEx(ref attr);
+        }
+        finally
+        {
+            handle.Free();
+        }
+    }
+
+    public static void End(ulong id)
+    {
+        nvtxRangeEnd(id);
+    }
+}
+
+
 [StructLayout(LayoutKind.Sequential)]
 struct nvtxEventAttributes_t {
     public ushort version; public ushort size;
