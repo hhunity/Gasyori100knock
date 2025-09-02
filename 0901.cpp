@@ -1,3 +1,40 @@
+
+static long _done;
+
+void OnResult(...) {
+    Interlocked.Increment(ref _done);
+}
+
+var timer = new System.Timers.Timer(1000);
+long last = 0;
+timer.Elapsed += (_, __) => {
+    long cur = Interlocked.Read(ref _done);
+    Console.WriteLine($"Throughput ~ {cur - last} fps");
+    last = cur;
+};
+timer.Start();
+
+readonly object _lock = new();
+readonly Queue<DateTime> _doneTs = new();
+readonly TimeSpan _win = TimeSpan.FromSeconds(5);
+
+void OnResult(...) {
+    var now = DateTime.UtcNow;
+    lock(_lock){
+        _doneTs.Enqueue(now);
+        while (_doneTs.Count>0 && now - _doneTs.Peek() > _win) _doneTs.Dequeue();
+    }
+}
+
+double GetFps(){
+    lock(_lock){
+        var now = DateTime.UtcNow;
+        while (_doneTs.Count>0 && now - _doneTs.Peek() > _win) _doneTs.Dequeue();
+        return _doneTs.Count / _win.TotalSeconds;
+    }
+}
+
+
 // ==== GpuCtx に追加 ====
 struct GpuCtx {
     ...
