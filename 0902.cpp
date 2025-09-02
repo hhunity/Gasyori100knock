@@ -1,3 +1,45 @@
+
+// 依存: 回転完了
+cv::cuda::Stream sFFT = sK;
+sFFT.waitEvent(s.evK);
+
+const int W = ctx->W, H = ctx->H;
+const int tiles = 4;
+const int baseW = W / tiles;
+const int rem   = W % tiles;
+
+s.d_mag_cat.create(H, W, CV_32FC1);
+
+int x = 0;
+for (int t = 0; t < tiles; ++t) {
+    int w = baseW + ((t == tiles-1) ? rem : 0);
+    cv::Rect roi(x, 0, w, H);
+    x += w;
+
+    cv::cuda::GpuMat tile = s.d_out(roi); // 回転後のタイル CV_32FC1
+
+    // ★ ここで窓を掛ける（GPU）
+    cv::cuda::GpuMat& winGpu = getHann2D(ctx, H, w);
+    cv::cuda::multiply(tile, winGpu, tile, 1.0, -1, sFFT); // tile ← tile * window
+
+    // 2D FFT（複素出力, パディングなし）
+    cv::cuda::GpuMat complex; // CV_32FC2
+    cv::cuda::dft(tile, complex, cv::Size(), cv::DFT_COMPLEX_OUTPUT, sFFT);
+
+    // magnitude
+    std::vector<cv::cuda::GpuMat> planes;
+    cv::cuda::split(complex, planes, sFFT);
+    cv::cuda::GpuMat mag;
+    cv::cuda::magnitude(planes[0], planes[1], mag, sFFT);
+
+    // 横に連結（GPU内）
+    mag.copyTo(s.d_mag_cat(roi), sFFT);
+}
+
+// まとめて1回 D2H → Host コールバック（前回と同じ）
+
+
+
 // gpu_async_fftpool.cpp  — ① 非同期Submit + DLL内 FFT専用スレッドプール + 最終結果コールバック
 // ビルド例: cl /O2 /MD /EHsc /LD gpu_async_fftpool.cpp /I<opencv\include> <opencv libs...>
 
