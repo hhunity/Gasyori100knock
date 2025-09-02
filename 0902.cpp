@@ -1,4 +1,93 @@
 
+// ComputeBackend.h
+#pragma once
+#include <opencv2/core.hpp>
+#include <opencv2/core/cuda.hpp>
+#include <atomic>
+#include <mutex>
+#include <string>
+
+enum class ComputeBackend { CPU, GPU };
+
+bool InitComputeBackend();         // 起動時に1回呼ぶ
+ComputeBackend GetBackend();       // どっちで動くか取得
+void TripToCpu(const char* reason); // 途中でGPUが落ちたらCPUへ切替（回路遮断）
+bool IsCudaBuild();                // 参考：ビルドがCUDA対応か
+
+// ComputeBackend.cpp
+#include "ComputeBackend.h"
+#include <opencv2/cudaarithm.hpp>
+#include <opencv2/cudafilters.hpp>
+#include <opencv2/cudawarping.hpp>
+#include <cstdlib>
+#include <iostream>
+
+namespace {
+std::once_flag g_once;
+std::atomic<ComputeBackend> g_backend{ComputeBackend::CPU};
+
+bool detectCudaOnce() {
+    try {
+        // 環境変数で強制CPU（デバッグ運用用）
+        if (const char* v = std::getenv("APP_FORCE_CPU")) {
+            if (std::string(v) == "1") return false;
+        }
+
+        // 1) デバイス数
+        int n = cv::cuda::getCudaEnabledDeviceCount();
+        if (n <= 0) return false;
+
+        // 2) 互換性（Compute Capabilityなど）
+        cv::cuda::DeviceInfo info(0);
+        if (!info.isCompatible()) return false;
+
+        // 3) 最小確保テスト（ドライバ異常などの早期検出）
+        cv::cuda::GpuMat test(8, 8, CV_8UC1);
+        (void)test;
+
+        return true;
+    } catch (...) {
+        return false;
+    }
+}
+} // namespace
+
+bool InitComputeBackend() {
+    std::call_once(g_once, [] {
+        g_backend.store(detectCudaOnce() ? ComputeBackend::GPU : ComputeBackend::CPU,
+                        std::memory_order_relaxed);
+        std::cout << "[Init] ComputeBackend = "
+                  << (g_backend.load()==ComputeBackend::GPU ? "GPU" : "CPU") << std::endl;
+        if (g_backend.load()==ComputeBackend::GPU) {
+            try { cv::cuda::printCudaDeviceInfo(0); } catch (...) {}
+        }
+    });
+    return g_backend.load()==ComputeBackend::GPU;
+}
+
+ComputeBackend GetBackend() {
+    return g_backend.load(std::memory_order_relaxed);
+}
+
+void TripToCpu(const char* reason) {
+    auto prev = g_backend.exchange(ComputeBackend::CPU);
+    if (prev != ComputeBackend::CPU) {
+        std::cerr << "[WARN] Switched to CPU due to GPU failure: "
+                  << (reason ? reason : "(unknown)") << std::endl;
+    }
+}
+
+bool IsCudaBuild() {
+    try {
+        const auto bi = cv::getBuildInformation();
+        return bi.find("CUDA") != std::string::npos; // 参考表示用（判定は detectCudaOnce が本体）
+    } catch (...) {
+        return false;
+    }
+}
+
+
+
 // 依存: 回転完了
 cv::cuda::Stream sFFT = sK;
 sFFT.waitEvent(s.evK);
