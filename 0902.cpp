@@ -1,4 +1,60 @@
 
+#pragma once
+#include <nvToolsExt.h>
+#include <string>
+
+class NvtxRange
+{
+public:
+    // スコープ自動管理用 (RAII)
+    NvtxRange(const char* name, int category = 0, unsigned int argb = 0xFF80C0FF)
+    {
+        nvtxEventAttributes_t attr = {};
+        attr.version = NVTX_VERSION;
+        attr.size = NVTX_EVENT_ATTRIB_STRUCT_SIZE;
+        attr.category = category;
+        attr.colorType = NVTX_COLOR_ARGB;
+        attr.color = argb;
+        attr.messageType = NVTX_MESSAGE_TYPE_ASCII;
+        attr.message.ascii = name;
+        id_ = nvtxRangeStartEx(&attr);
+    }
+
+    ~NvtxRange()
+    {
+        if (id_ != 0)
+            nvtxRangeEnd(id_);
+    }
+
+    // 非同期用途：明示的に閉じる
+    void End()
+    {
+        if (id_ != 0)
+        {
+            nvtxRangeEnd(id_);
+            id_ = 0;
+        }
+    }
+
+    // コピー禁止、ムーブ許可
+    NvtxRange(const NvtxRange&) = delete;
+    NvtxRange& operator=(const NvtxRange&) = delete;
+    NvtxRange(NvtxRange&& other) noexcept { id_ = other.id_; other.id_ = 0; }
+    NvtxRange& operator=(NvtxRange&& other) noexcept
+    {
+        if (this != &other)
+        {
+            End();
+            id_ = other.id_;
+            other.id_ = 0;
+        }
+        return *this;
+    }
+
+private:
+    nvtxRangeId_t id_{0};
+};
+
 using System;
 using System.Runtime.InteropServices;
 
