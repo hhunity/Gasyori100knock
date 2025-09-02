@@ -1,3 +1,27 @@
+[StructLayout(LayoutKind.Sequential)]
+struct nvtxEventAttributes_t {
+    public ushort version; public ushort size;
+    public int category; public int colorType; public uint color;
+    public int messageType; public IntPtr message; // ANSI
+}
+internal static class NvtxEx {
+    [DllImport("nvToolsExt64_1.dll", CallingConvention = CallingConvention.Cdecl)]
+    static extern ulong nvtxRangeStartEx(ref nvtxEventAttributes_t attr);
+    [DllImport("nvToolsExt64_1.dll", CallingConvention = CallingConvention.Cdecl)]
+    static extern void nvtxRangeEnd(ulong id);
+
+    public static IDisposable Push(string name, int cat = 0, uint rgb = 0x00A0FFFF) {
+        var bytes = System.Text.Encoding.ASCII.GetBytes(name + "\0");
+        var ptr = Marshal.UnsafeAddrOfPinnedArrayElement(bytes, 0);
+        var a = new nvtxEventAttributes_t {
+            version = 1, size = (ushort)Marshal.SizeOf<nvtxEventAttributes_t>(),
+            category = cat, colorType = 1, color = rgb, messageType = 1, message = ptr
+        };
+        ulong id = nvtxRangeStartEx(ref a);
+        return new Pop{id=id};
+    }
+    private sealed class Pop : IDisposable { public ulong id; public void Dispose()=>nvtxRangeEnd(id); }
+}
 
 using System;
 using System.Runtime.InteropServices;
