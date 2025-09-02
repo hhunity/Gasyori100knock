@@ -1,4 +1,59 @@
 
+using System;
+using System.Runtime.InteropServices;
+using System.Threading;
+using System.Threading.Tasks;
+
+internal static class Nvtx
+{
+    // Windows x64 の nvToolsExt
+    [DllImport("nvToolsExt64_1.dll", CallingConvention = CallingConvention.Cdecl)]
+    public static extern int nvtxRangePushA([MarshalAs(UnmanagedType.LPStr)] string message);
+
+    [DllImport("nvToolsExt64_1.dll", CallingConvention = CallingConvention.Cdecl)]
+    public static extern int nvtxRangePop();
+
+    [DllImport("nvToolsExt64_1.dll", CallingConvention = CallingConvention.Cdecl)]
+    public static extern void nvtxNameOsThread(uint threadId, [MarshalAs(UnmanagedType.LPStr)] string name);
+
+    [DllImport("kernel32.dll")]
+    private static extern uint GetCurrentThreadId();
+
+    public static IDisposable Push(string name)
+    {
+        // スレッドに名前が未設定なら付ける（任意）
+        nvtxNameOsThread(GetCurrentThreadId(), $"T{GetCurrentThreadId()}");
+        nvtxRangePushA(name);
+        return new PopOnDispose();
+    }
+
+    private sealed class PopOnDispose : IDisposable
+    {
+        public void Dispose() => nvtxRangePop();
+    }
+}
+
+// 使い方例：任意区間をNVTXで囲む
+public static class Example
+{
+    public static void Run()
+    {
+        Parallel.For(0, 8, i =>
+        {
+            using (Nvtx.Push($"Item {i}"))
+            {
+                using (Nvtx.Push("Rotate")) Rotate();
+                using (Nvtx.Push("FFT"))    Fft();
+                using (Nvtx.Push("Post"))   Post();
+            }
+        });
+    }
+
+    static void Rotate() { /* 対象処理 */ Thread.SpinWait(200000); }
+    static void Fft()    { /* 対象処理 */ Thread.SpinWait(400000); }
+    static void Post()   { /* 対象処理 */ Thread.SpinWait(150000); }
+}
+
 // ComputeBackend.h
 #pragma once
 #include <opencv2/core.hpp>
