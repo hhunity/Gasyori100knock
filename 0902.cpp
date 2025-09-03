@@ -1,3 +1,147 @@
+// GpuCtx にメンバ追加
+cufftHandle planC2C4 = 0;
+int tileW = 0, tileH = 0; // プランのサイズを覚えておく
+
+
+// gp_create_ctx の最後あたり（回転行列などの後）
+{
+    ctx->tileH = height;
+    ctx->tileW = width / 4;                 // W%4==0 前提
+
+    int n[2]      = { ctx->tileW, ctx->tileH };  // {X=幅, Y=高さ}
+    int inembed[2]= { ctx->tileW, ctx->tileH };
+    int onembed[2]= { ctx->tileW, ctx->tileH };
+    int istride   = 1, ostride = 1;
+    int idist     = ctx->tileW * ctx->tileH;     // 1スライスの要素数
+    int odist     = idist;
+    int batch     = 4;
+
+    cufftPlanMany(&ctx->planC2C4, 2, n,
+                  inembed, istride, idist,
+                  onembed, ostride, odist,
+                  CUFFT_C2C, batch);
+    // FFTは回転完了後の sFFT ストリームで回す想定（実行時に SetStream）
+}
+
+
+
+// 2D Hann (H×w) を GPU にキャッシュ（前に出したやつでOK）
+cv::cuda::GpuMat& getHann2D(GpuCtx* ctx, int H, int w);
+
+// 実数タイルを float2(Imag=0) へ詰める＋窓を掛けるカーネル
+__global__ void pack_with_window(const float* __restrict__ src, size_t srcPitchFloats,
+                                 const float* __restrict__ win, // H×w
+                                 float2* __restrict__ dst, int w, int H, size_t dstSliceElems)
+{
+    int x = blockDim.x * blockIdx.x + threadIdx.x;
+    int y = blockDim.y * blockIdx.y + threadIdx.y;
+    if (x >= w || y >= H) return;
+    float v = src[y*srcPitchFloats + x] * win[y*w + x];
+    dst[y*w + x] = make_float2(v, 0.0f);
+    // dst は各バッチの先頭を渡す想定（呼び出し側で +t*dstSliceElems する）
+}
+
+
+// 2D Hann (H×w) を GPU にキャッシュ（前に出したやつでOK）
+cv::cuda::GpuMat& getHann2D(GpuCtx* ctx, int H, int w);
+
+// 実数タイルを float2(Imag=0) へ詰める＋窓を掛けるカーネル
+__global__ void pack_with_window(const float* __restrict__ src, size_t srcPitchFloats,
+                                 const float* __restrict__ win, // H×w
+                                 float2* __restrict__ dst, int w, int H, size_t dstSliceElems)
+{
+    int x = blockDim.x * blockIdx.x + threadIdx.x;
+    int y = blockDim.y * blockIdx.y + threadIdx.y;
+    if (x >= w || y >= H) return;
+    float v = src[y*srcPitchFloats + x] * win[y*w + x];
+    dst[y*w + x] = make_float2(v, 0.0f);
+    // dst は各バッチの先頭を渡す想定（呼び出し側で +t*dstSliceElems する）
+}
+
+// 2D Hann (H×w) を GPU にキャッシュ（前に出したやつでOK）
+cv::cuda::GpuMat& getHann2D(GpuCtx* ctx, int H, int w);
+
+// 実数タイルを float2(Imag=0) へ詰める＋窓を掛けるカーネル
+__global__ void pack_with_window(const float* __restrict__ src, size_t srcPitchFloats,
+                                 const float* __restrict__ win, // H×w
+                                 float2* __restrict__ dst, int w, int H, size_t dstSliceElems)
+{
+    int x = blockDim.x * blockIdx.x + threadIdx.x;
+    int y = blockDim.y * blockIdx.y + threadIdx.y;
+    if (x >= w || y >= H) return;
+    float v = src[y*srcPitchFloats + x] * win[y*w + x];
+    dst[y*w + x] = make_float2(v, 0.0f);
+    // dst は各バッチの先頭を渡す想定（呼び出し側で +t*dstSliceElems する）
+}
+
+const int H = ctx->H, W = ctx->W;
+const int batch = 4;
+const int w = ctx->tileW;     // W/4
+const size_t sliceElems = (size_t)H * w;
+
+// 連結出力（CV_32FC2, H×W）をGPUに確保
+s.d_fft_cat.create(H, W, CV_32FC2);
+
+// batched 入力バッファ（float2, [4][H][w]）を一時確保（スロット再利用推奨）
+float2* d_batch = nullptr;
+cudaMallocAsync(&d_batch, batch * sliceElems * sizeof(float2),
+                cv::cuda::StreamAccessor::getStream(sK));  // sK/sFFTどちらでも
+
+// FFT ストリームを決める（回転に依存）
+cv::cuda::Stream sFFT = sK;
+sFFT.waitEvent(s.evK);
+cufftSetStream(ctx->planC2C4, cv::cuda::StreamAccessor::getStream(sFFT));
+
+// 窓
+cv::cuda::GpuMat& win = getHann2D(ctx, H, w);
+
+// 4タイルを pack_with_window で一括パック
+dim3 blk(32, 8);
+dim3 grd((w + blk.x - 1)/blk.x, (H + blk.y - 1)/blk.y);
+
+for (int t = 0; t < batch; ++t) {
+    cv::Rect roi(t * w, 0, w, H);
+    cv::cuda::GpuMat tile = s.d_out(roi);     // CV_32FC1
+    const float* src = tile.ptr<float>();
+    size_t srcPitchF = tile.step / sizeof(float);
+
+    float2* dst = d_batch + (size_t)t * sliceElems;
+
+    pack_with_window<<<grd, blk, 0, cv::cuda::StreamAccessor::getStream(sFFT)>>>(
+        src, srcPitchF, win.ptr<float>(), dst, w, H, sliceElems);
+}
+
+// batched FFT（in-place）
+cufftExecC2C(ctx->planC2C4,
+             reinterpret_cast<cufftComplex*>(d_batch),
+             reinterpret_cast<cufftComplex*>(d_batch),
+             CUFFT_FORWARD);
+
+// batched の各スライスを横に連結して d_fft_cat に配置（GPU内2Dコピー）
+for (int t = 0; t < batch; ++t) {
+    cv::Rect roi(t * w, 0, w, H);
+    // dst: GpuMat ROI (CV_32FC2)
+    auto dst = s.d_fft_cat(roi);
+    // src: d_batch + t*sliceElems（連続, pitch = w*sizeof(float2)）
+    cudaMemcpy2DAsync(dst.ptr(), dst.step,
+                      d_batch + (size_t)t * sliceElems, w * sizeof(float2),
+                      w * sizeof(float2), H,
+                      cudaMemcpyDeviceToDevice,
+                      cv::cuda::StreamAccessor::getStream(sFFT));
+}
+
+// （ここで d_batch を解放 or 再利用用に Slot に保持）
+cudaFreeAsync(d_batch, cv::cuda::StreamAccessor::getStream(sFFT));
+
+// まとめて1回 D2H（CV_32FC2, H×W）
+sD2H.waitEvent(s.evK);          // sFFT と同一なら暗黙順序でもOK
+s.d_fft_cat.download(s.fft_cat_host, sD2H);  // cv::Mat(CV_32FC2)
+cudaEventRecord(s.evD2H, cv::cuda::StreamAccessor::getStream(sD2H));
+
+// D2H 完了 → cudaLaunchHostFunc で軽い通知 → 自前プール or 直接コールバック
+
+
+
 // 依存: H2D→回転
 sK.waitEvent(s.evH2D);
 cv::cuda::warpAffine(s.d_in, s.d_out, ctx->rotM, s.d_out.size(),
