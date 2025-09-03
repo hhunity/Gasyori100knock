@@ -1,3 +1,72 @@
+// 依存: H2D→回転
+sK.waitEvent(s.evH2D);
+cv::cuda::warpAffine(s.d_in, s.d_out, ctx->rotM, s.d_out.size(),
+                     cv::INTER_LINEAR, cv::BORDER_CONSTANT, cv::Scalar(0), sK);
+cudaEventRecord(s.evK, cv::cuda::StreamAccessor::getStream(sK));
+
+// ===== ここから窓＋前方DFT（GPU） =====
+const int W = ctx->W, H = ctx->H;
+const int tiles = 4;
+const int baseW = W / tiles;
+const int rem   = W % tiles;
+
+// DFT用の出力（複素2ch）をGPUに用意（4帯を横に並べる）
+s.d_fft_cat.create(H, W, CV_32FC2);   // <- 新規: Slot に GpuMat 追加しておく
+
+cv::cuda::Stream sFFT = sK;           // 同じでもOK（別にしても可）
+sFFT.waitEvent(s.evK);
+
+int x = 0;
+for (int t = 0; t < tiles; ++t) {
+    int w = baseW + ((t == tiles-1) ? rem : 0);
+    cv::Rect roi(x, 0, w, H); x += w;
+
+    // 1) ROI（回転後, CV_32FC1）
+    cv::cuda::GpuMat tile = s.d_out(roi);
+
+    // 2) 窓（Hann）をGPUで掛ける
+    auto& win = getHann2D(ctx, H, w);
+    cv::cuda::multiply(tile, win, tile, 1.0, -1, sFFT); // in-place OK
+
+    // 3) 前方2D DFT（パディングなし, 複素出力 CV_32FC2）
+    cv::cuda::GpuMat complex; // H×w×2ch
+    cv::cuda::dft(tile, complex, cv::Size(), cv::DFT_COMPLEX_OUTPUT, sFFT);
+
+    // 4) 横に連結（GPU内コピー）
+    complex.copyTo(s.d_fft_cat(roi), sFFT);
+}
+
+// 5) まとめて1回だけ D2H（複素2chのまま）
+sD2H.waitEvent(s.evK); //（sFFT と同一なら暗黙順序でOK）
+s.d_fft_cat.download(s.fft_cat_host, sD2H); // cv::Mat(CV_32FC2) を Slot に用意しておく
+cudaEventRecord(s.evD2H, cv::cuda::StreamAccessor::getStream(sD2H));
+
+// ===== D2H 完了でホスト関数 → コールバック =====
+auto rawD2H = cv::cuda::StreamAccessor::getStream(sD2H);
+struct Payload { GpuCtx* ctx; int slot; int fid; void* user; };
+auto* p = new Payload{ctx, j.slot, j.frame_id, j.user};
+
+cudaLaunchHostFunc(rawD2H, [](void* ud){
+    std::unique_ptr<Payload> P((Payload*)ud);
+    auto* ctx = P->ctx; int slot = P->slot; int fid = P->fid; void* user = P->user;
+    auto& s = ctx->slots[slot];
+
+    // s.fft_cat_host: CV_32FC2, 幅W×高さH, 各画素が (Re,Im)
+    if (ctx->cb) {
+        ctx->cb(fid,
+                reinterpret_cast<const float*>(s.fft_cat_host.ptr()),
+                ctx->W, ctx->H,
+                static_cast<int>(s.fft_cat_host.step),   // バイト単位の行ストライド
+                user ? user : ctx->user);
+    }
+    // スロット解放
+    { std::lock_guard<std::mutex> lk(ctx->mu);
+      s.id = -1; ctx->freeSlots.push(slot); }
+    ctx->cv.notify_all();
+}, p);
+
+
+
 using System;
 using System.Diagnostics.Tracing;
 using System.Threading;
