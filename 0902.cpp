@@ -1,3 +1,54 @@
+using System;
+using System.Diagnostics.Tracing;
+using System.Threading;
+
+[EventSource(Name = "MyCompany-MyApp")]
+class MyEventSource : EventSource
+{
+    public static readonly MyEventSource Log = new MyEventSource();
+
+    [Event(1, Message = "FFT開始", Level = EventLevel.Informational)]
+    public void FftStart() => WriteEvent(1);
+
+    [Event(2, Message = "FFT終了", Level = EventLevel.Informational)]
+    public void FftEnd() => WriteEvent(2);
+}
+
+class Program
+{
+    static void Main()
+    {
+        MyEventSource.Log.FftStart();
+        Thread.Sleep(50); // ダミー処理
+        MyEventSource.Log.FftEnd();
+    }
+}
+
+#include <windows.h>
+#include <TraceLoggingProvider.h>
+
+// プロバイダー定義
+TRACELOGGING_DEFINE_PROVIDER(
+    g_hMyProvider,
+    "MyCompany-MyApp",
+    // GUID は `uuidgen` で生成
+    (0x12345678,0x1234,0x1234,0x12,0x34,0x56,0x78,0x9a,0xbc,0xde,0xf0)
+);
+
+int main()
+{
+    TraceLoggingRegister(g_hMyProvider);
+
+    TraceLoggingWrite(g_hMyProvider, "FFT_Start");
+    Sleep(50);
+    TraceLoggingWrite(g_hMyProvider, "FFT_End");
+
+    TraceLoggingUnregister(g_hMyProvider);
+    return 0;
+}
+
+
+
 
 #pragma once
 #include <nvToolsExt.h>
