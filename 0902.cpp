@@ -1,3 +1,105 @@
+
+using System;
+using System.Drawing;
+using System.Windows.Forms;
+
+namespace WinFormsApp
+{
+    public partial class Form1 : Form
+    {
+        private Point _lastClickedPointClient = Point.Empty;   // クリック保存用（クライアント座標）
+
+        private readonly ContextMenuStrip _cmenu = new ContextMenuStrip();
+        private readonly ToolStripMenuItem _miUsePoint = new ToolStripMenuItem("この座標を入力");
+
+        private readonly PictureBox pictureBox1 = new PictureBox();
+        private readonly TextBox textBoxPoint = new TextBox();
+
+        public Form1()
+        {
+            InitializeComponent();
+
+            // --- PictureBox の初期設定 ---
+            pictureBox1.Dock = DockStyle.Fill;
+            pictureBox1.BackColor = Color.LightGray;
+            pictureBox1.ContextMenuStrip = _cmenu;
+            this.Controls.Add(pictureBox1);
+
+            // --- TextBox の初期設定 ---
+            textBoxPoint.Dock = DockStyle.Bottom;
+            this.Controls.Add(textBoxPoint);
+
+            // --- コンテキストメニュー構築 ---
+            _cmenu.Items.Add(_miUsePoint);
+
+            // 右クリック位置を記録
+            pictureBox1.MouseDown += (s, e) =>
+            {
+                if (e.Button == MouseButtons.Right)
+                {
+                    // pictureBox1 内の相対座標を保存
+                    _lastClickedPointClient = e.Location;
+                }
+            };
+
+            // メニューのコマンドで TextBox に書き込む
+            _miUsePoint.Click += (s, e) =>
+            {
+                textBoxPoint.Text = $"{_lastClickedPointClient.X}, {_lastClickedPointClient.Y}";
+            };
+
+            // 念のため、メニューが開く直前に最新座標を再取得
+            _cmenu.Opening += (s, e) =>
+            {
+                if (_cmenu.SourceControl is Control src)
+                {
+                    var client = src.PointToClient(Cursor.Position);
+                    _lastClickedPointClient = client;
+                }
+            };
+        }
+    }
+}
+public class SafeStore
+{
+    private readonly object _gate = new object(); // 絶対に public にしない & this には lock しない
+
+    private int _value;
+
+    public void Write(int v)
+    {
+        lock (_gate)
+        {
+            _value = v;
+        }
+    }
+
+    public int ReadAndClear()
+    {
+        lock (_gate)
+        {
+            int tmp = _value;
+            _value = 0;
+            return tmp;
+        }
+    }
+}
+
+using var mtx = new Mutex(false, @"Global\MyApp_UniqueResource");
+mtx.WaitOne();
+try
+{
+    // 共有資源を使用
+}
+finally { mtx.ReleaseMutex(); }
+
+
+
+
+
+
+
+
 // GpuCtx にメンバ追加
 cufftHandle planC2C4 = 0;
 int tileW = 0, tileH = 0; // プランのサイズを覚えておく
