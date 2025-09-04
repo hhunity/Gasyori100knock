@@ -125,7 +125,34 @@ int tileW = 0, tileH = 0; // プランのサイズを覚えておく
     // FFTは回転完了後の sFFT ストリームで回す想定（実行時に SetStream）
 }
 
+#include "hann_window.hpp"
+#include <opencv2/core.hpp>  // createHanningWindow
 
+// GpuCtx 側にキャッシュを持たせる想定
+struct GpuCtx {
+    std::mutex winMu;
+    // 幅だけが変わる運用なら key=W で十分。高さも変わるなら pair<int,int> をキーにする。
+    std::unordered_map<int, cv::cuda::GpuMat> winCacheGpu;
+};
+
+cv::cuda::GpuMat& getHann2D(GpuCtx* ctx, int H, int W)
+{
+    std::lock_guard<std::mutex> lk(ctx->winMu);
+
+    if (auto it = ctx->winCacheGpu.find(W); it != ctx->winCacheGpu.end())
+        return it->second;
+
+    // CPUで2D Hann生成（OpenCVが外積で作ってくれる）
+    cv::Mat hann2d;
+    cv::createHanningWindow(hann2d, cv::Size(W, H), CV_32F); // H×W, CV_32FC1
+
+    // GPUへアップロードしてキャッシュ
+    cv::cuda::GpuMat winGpu;
+    winGpu.upload(hann2d);
+
+    auto [it2, ok] = ctx->winCacheGpu.emplace(W, std::move(winGpu));
+    return it2->second;
+}
 
 // 2D Hann (H×w) を GPU にキャッシュ（前に出したやつでOK）
 cv::cuda::GpuMat& getHann2D(GpuCtx* ctx, int H, int w);
