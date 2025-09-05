@@ -1,4 +1,45 @@
 
+int fourH = rF.rows;
+int i = 0;
+
+while (i < fourH) {
+    int i0 = i;  // この試行の開始位置
+
+    // 1) 白ラン（>= minFirstWhite）
+    int w1 = 0;
+    while (i < fourH && rF.at<float>(i) < whiteMaxBlackRatio) { ++w1; ++i; }
+    if (w1 < minFirstWhite) {
+        i = i0 + 1;           // ← ここが重要：開始位置を1行だけ進めて再試行
+        continue;
+    }
+
+    // 2) 黒ラン（連続、長さ [minBlack, maxBlack]）
+    int b = 0;
+    int bStartIdx = i;        // 黒開始のインデックス
+    while (i < fourH && rF.at<float>(i) >= blackMinBlackRatio) { ++b; ++i; }
+
+    if (b >= minBlack && b <= maxBlack) {
+        // 3) 後続の白ラン（>= minSecondWhite）
+        int w2 = 0;
+        int j = i;
+        while (j < fourH && rF.at<float>(j) < whiteMaxBlackRatio) { ++w2; ++j; }
+
+        if (w2 >= minSecondWhite) {
+            // ヒット！
+            out.found = true;
+            out.blackStart = globalBaseLine_ - (3LL * blockH_) + bStartIdx;
+            out.blackEnd   = out.blackStart + (b - 1);
+            resetWindowAfterHit();
+            globalBaseLine_ += blockH_;
+            slideWindow();
+            return out;
+        }
+    }
+
+    // どこかの条件で失敗 → 開始位置を1行だけ進めて再試行
+    i = i0 + 1;
+}
+
 // Sliding4BlocksStrict.hpp
 #pragma once
 #include <opencv2/opencv.hpp>
