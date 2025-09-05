@@ -1,3 +1,198 @@
+
+
+// PatternDetectorCV_Fuzzy.hpp
+#pragma once
+#include <opencv2/opencv.hpp>
+#include <cstdint>
+#include <cmath>
+#include <limits>
+
+class PatternDetectorCV_Fuzzy {
+public:
+    // --- 期待パターン: (白 >= minFirstWhite) -> (黒 >= minBlack) -> (白 >= minSecondWhite) ---
+    int minFirstWhite  = 100;
+    int minBlack       = 180;  // ← 200ピッタリでなく最小値でOKにする
+    int minSecondWhite = 100;
+
+    // 黒長の上限を付けたい場合（0なら無視）：例 240 行
+    int maxBlack       = 0;    // 0 で無効（上限なし）
+
+    // ヒステリシス：行の「黒率」(0..1) で判定
+    //   白: black_ratio < whiteMaxBlackRatio
+    //   黒: black_ratio >= blackMinBlackRatio
+    // その中間（グレーゾーン）は“どちらでもない”
+    float whiteMaxBlackRatio = 0.20f; // 白は黒率 < 20%
+    float blackMinBlackRatio = 0.60f; // 黒は黒率 >= 60%
+
+    // ギャップ許容（“その状態に相反する行”を何行まで連続で許すか）
+    int  allowedWhiteGaps = 6; // 白カウント中に黒/灰が混ざってよい最大連続行
+    int  allowedBlackGaps = 8; // 黒カウント中に白/灰が混ざってよい最大連続行
+
+    // 二値化モード：1=Otsu（推奨）、0=固定しきい（binThresh使用）
+    int  binarizeMode = 1;
+    int  binThresh    = 128;
+
+    // 列方向ROI（全幅: x=0, w=-1）
+    int roiX = 0, roiW = -1;
+
+    struct Result {
+        bool    found = false;
+        int64_t blackStart = -1; // 黒開始（inclusive, global）
+        int64_t blackEnd   = -1; // 黒終了（inclusive, global）
+        int64_t blackCenter() const { return (blackStart>=0 && blackEnd>=0)? (blackStart+blackEnd)/2 : -1; }
+    };
+
+    PatternDetectorCV_Fuzzy(){ reset(); }
+    void reset(){
+        state_ = State::FirstWhite;
+        cnt_ = 0; gap_ = 0;
+        globalLine_ = 0;
+        blackStart_ = -1; blackEnd_ = -1; lastBlackLine_ = -1;
+    }
+
+    // 生ポインタのブロックを投入（8bitグレイ）
+    Result pushBlock(const uint8_t* data, int width, int height, ptrdiff_t stride = -1) {
+        Result out;
+        if (!data || width<=0 || height<=0) { globalLine_ += (height>0?height:0); return out; }
+        if (stride < 0) stride = width;
+
+        // ポインタにヘッダを被せる（ノーコピー）
+        cv::Mat block(height, width, CV_8UC1, const_cast<uint8_t*>(data), (size_t)stride);
+
+        // ROI クリップ
+        int x0 = roiX < 0 ? 0 : (roiX > width ? width : roiX);
+        int ww = (roiW>0 ? roiW : width);
+        if (ww > width - x0) ww = width - x0;
+        if (ww <= 0) { globalLine_ += height; return out; }
+
+        cv::Mat view = block(cv::Rect(x0, 0, ww, height));
+
+        // 二値化（黒=255, 白=0）
+        cv::Mat bin;
+        if (binarizeMode==1) {
+            cv::threshold(view, bin, 0, 255, cv::THRESH_BINARY_INV | cv::THRESH_OTSU);
+        } else {
+            cv::threshold(view, bin, binThresh, 255, cv::THRESH_BINARY_INV);
+        }
+
+        // 行ごとの黒率 (0..1)
+        cv::Mat blackRatioF;
+        cv::reduce(bin, blackRatioF, 1, cv::REDUCE_AVG, CV_32F);
+        blackRatioF /= 255.0f;
+
+        // ラインごとに状態機械を進める
+        for (int i=0; i<blackRatioF.rows; ++i) {
+            float r = blackRatioF.at<float>(i);
+            bool isWhite = (r < whiteMaxBlackRatio);
+            bool isBlack = (r >= blackMinBlackRatio);
+
+            switch (state_) {
+            case State::FirstWhite:
+                if (isWhite) { ++cnt_; gap_ = 0; }
+                else {
+                    if (++gap_ > allowedWhiteGaps) { cnt_ = 0; gap_ = 0; } // 連続ギャップ超えで白カウントやり直し
+                }
+                if (cnt_ >= minFirstWhite) { state_=State::Black; cnt_=0; gap_=0; }
+                break;
+
+            case State::Black:
+                if (isBlack) {
+                    if (cnt_ == 0) blackStart_ = globalLine_ + i;
+                    ++cnt_; gap_ = 0;
+                    lastBlackLine_ = globalLine_ + i; // 最新の“真に黒”行を覚える
+                    if (maxBlack > 0 && cnt_ > maxBlack) { // 上限を超えたら失敗としてリセット（必要ないなら無視）
+                        cnt_ = 0; gap_ = 0; blackStart_ = -1; lastBlackLine_ = -1;
+                        state_ = State::FirstWhite;
+                    }
+                } else {
+                    // 黒でない行（白/灰）：ギャップとして許容
+                    if (++gap_ > allowedBlackGaps) {
+                        // 許容超え → 黒カウントリセット
+                        cnt_ = 0; gap_ = 0; blackStart_ = -1; lastBlackLine_ = -1;
+                        state_ = State::FirstWhite; // 先頭白からやり直す（厳密運用）
+                        break;
+                    }
+                }
+                if (cnt_ >= minBlack) {
+                    // 最小長さは満たした → 次の白へ遷移
+                    blackEnd_ = (lastBlackLine_ >= 0) ? lastBlackLine_ : (globalLine_ + i);
+                    state_ = State::SecondWhite; cnt_ = 0; gap_ = 0;
+                }
+                break;
+
+            case State::SecondWhite:
+                if (isWhite) { ++cnt_; gap_ = 0; }
+                else {
+                    if (++gap_ > allowedWhiteGaps) { cnt_ = 0; gap_ = 0; } // 許容超えで白やり直し
+                }
+                if (cnt_ >= minSecondWhite) {
+                    out.found = true;
+                    out.blackStart = blackStart_;
+                    out.blackEnd   = blackEnd_;
+                    reset();                          // 1パターン検出後は初期化（必要なら連続検出に変えてOK）
+                    // このブロック以降の行番号調整
+                    globalLine_ += (blackRatioF.rows - (i+1));
+                    return out;
+                }
+                break;
+            }
+        }
+
+        globalLine_ += blackRatioF.rows;
+        return out;
+    }
+
+private:
+    enum class State { FirstWhite, Black, SecondWhite } state_;
+    int64_t globalLine_ = 0;
+    int     cnt_ = 0;
+    int     gap_ = 0;
+
+    int64_t blackStart_ = -1;
+    int64_t blackEnd_   = -1;
+    int64_t lastBlackLine_ = -1; // 直近の“真に黒”行
+};
+
+#include "PatternDetectorCV_Fuzzy.hpp"
+#include <vector>
+#include <iostream>
+
+int main(){
+    PatternDetectorCV_Fuzzy det;
+
+    // 許容を広めに
+    det.minFirstWhite  = 90;     // 100の代わりに 90〜OK
+    det.minBlack       = 180;    // 200の代わりに 180〜OK
+    det.minSecondWhite = 90;
+    det.maxBlack       = 240;    // 上限付けたいなら（不要なら 0 のまま）
+
+    det.whiteMaxBlackRatio = 0.25f; // 白は黒率 < 25%
+    det.blackMinBlackRatio = 0.55f; // 黒は黒率 >= 55%
+    det.allowedWhiteGaps = 8;   // 白の途切れ許容
+    det.allowedBlackGaps = 12;  // 黒の途切れ許容
+    det.binarizeMode     = 1;   // Otsu
+
+    // ダミー画像（H 行中、ややガタつく黒帯 190 行）
+    const int W=2048, H=450;
+    std::vector<uint8_t> buf(W*H, 230); // 白
+    // 黒帯：110..299 に黒、合間にところどころ白を混ぜる
+    for (int y=110; y<=299; ++y) {
+        uint8_t v = (y%17==0) ? 200 : 30; // たまに明るめ(=穴)を混ぜる
+        std::fill_n(buf.data()+y*W, W, v);
+    }
+
+    auto res = det.pushBlock(buf.data(), W, H, W);
+    if (res.found) {
+        std::cout << "FOUND: blackStart="<<res.blackStart
+                  << " blackEnd="<<res.blackEnd
+                  << " center="<<res.blackCenter() << "\n";
+    } else {
+        std::cout << "NOT FOUND\n";
+    }
+}
+
+
+
 // PatternDetectorCV_Ratio.hpp
 #pragma once
 #include <opencv2/opencv.hpp>
