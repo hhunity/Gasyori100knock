@@ -1,5 +1,22 @@
 
 
+// Otsu 二値（黒→255）※反転しないなら、後の判定ロジックを合わせてね
+cv::Mat bin;
+cv::threshold(view, bin, 0, 255, cv::THRESH_BINARY_INV | cv::THRESH_OTSU);
+
+// 1) 白スジ埋め（縦方向 Close）
+cv::Mat kClose = cv::getStructuringElement(cv::MORPH_RECT, cv::Size(1,5));
+cv::morphologyEx(bin, bin, cv::MORPH_CLOSE, kClose, cv::Point(-1,-1), 1);
+
+// 2) 黒の塩粒除去（横方向 Open）
+cv::Mat kOpen  = cv::getStructuringElement(cv::MORPH_RECT, cv::Size(3,1));
+cv::morphologyEx(bin, bin, cv::MORPH_OPEN,  kOpen,  cv::Point(-1,-1), 1);
+
+// 行ごとの黒率を算出して、連続 [minBlack,maxBlack] を判定
+cv::Mat blackRatioF;
+cv::reduce(bin, blackRatioF, 1, cv::REDUCE_AVG, CV_32F);
+blackRatioF /= 255.0f;
+
 // PatternDetectorCV_IntensityStrict.hpp
 #pragma once
 #include <opencv2/opencv.hpp>
