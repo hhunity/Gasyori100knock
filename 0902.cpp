@@ -1,5 +1,146 @@
 
 
+// PatternDetectorCV_IntensityStrict.hpp
+#pragma once
+#include <opencv2/opencv.hpp>
+#include <cstdint>
+
+class PatternDetectorCV_IntensityStrict {
+public:
+    // 期待パターン: 白(>=minFirstWhite) -> 黒(連続[minBlack,maxBlack]) -> 白(>=minSecondWhite)
+    int   minFirstWhite  = 100;
+    int   minBlack       = 200;
+    int   maxBlack       = 300;
+    int   minSecondWhite = 100;
+
+    // ヒステリシスしきい（平均輝度 0..255）
+    // 例: 白判定は >= 180、黒判定は <= 120（間は前状態を維持）
+    int   thrWhiteHigh = 180;  // 白確定境界（高いほど白に厳しい）
+    int   thrBlackLow  = 120;  // 黒確定境界（低いほど黒に厳しい）
+
+    // 行平均を少し平滑化（0/1=無効, >=2 で指数移動平均）
+    int   emaStrength = 0;
+
+    // 列方向 ROI（全幅: x=0, w=-1）
+    int   roiX = 0, roiW = -1;
+
+    struct Result {
+        bool    found = false;
+        int64_t blackStart = -1; // inclusive (global line)
+        int64_t blackEnd   = -1; // inclusive
+        int64_t blackCenter() const { return (blackStart>=0 && blackEnd>=0) ? ((blackStart+blackEnd)/2) : -1; }
+    };
+
+    PatternDetectorCV_IntensityStrict(){ reset(); }
+    void reset(){
+        state_ = State::FirstWhite; cnt_ = 0; globalLine_ = 0;
+        blackStart_ = -1; blackEnd_ = -1; emaValid_ = false; ema_ = 0.f;
+        lastStateBW_ = 0; // 1=white, -1=black, 0=unknown
+    }
+
+    // 生ポインタのブロック投入（8bitグレイ）
+    Result pushBlock(const uint8_t* data, int width, int height, ptrdiff_t stride=-1){
+        Result out;
+        if (!data || width<=0 || height<=0) { globalLine_ += (height>0?height:0); return out; }
+        if (stride < 0) stride = width;
+
+        cv::Mat block(height, width, CV_8UC1, const_cast<uint8_t*>(data), (size_t)stride);
+
+        // ROI クリップ
+        int x0 = (roiX < 0) ? 0 : (roiX > width ? width : roiX);
+        int ww = (roiW > 0) ? roiW : width;
+        if (ww > width - x0) ww = width - x0;
+        if (ww <= 0) { globalLine_ += height; return out; }
+
+        cv::Mat view = block(cv::Rect(x0, 0, ww, height));
+
+        // 行平均(0..255)を一括計算
+        cv::Mat rowMeanF;
+        cv::reduce(view, rowMeanF, 1, cv::REDUCE_AVG, CV_32F);
+
+        for (int i=0; i<rowMeanF.rows; ++i){
+            float m = rowMeanF.at<float>(i);
+
+            // EMA 平滑（任意）
+            if (emaStrength >= 2){
+                float alpha = 1.0f / (float)emaStrength;
+                if (!emaValid_) { ema_ = m; emaValid_ = true; }
+                else            { ema_ = (1.0f - alpha)*ema_ + alpha*m; }
+            } else {
+                ema_ = m;
+                emaValid_ = true;
+            }
+
+            // ヒステリシス判定
+            int bw = lastStateBW_;
+            if (ema_ >= thrWhiteHigh) bw = 1;      // 白確定
+            else if (ema_ <= thrBlackLow) bw = -1; // 黒確定
+            // 中間帯では bw を変えない（直前状態を維持）
+
+            switch (state_) {
+            case State::FirstWhite:
+                if (bw == 1) { if (++cnt_ >= minFirstWhite) { state_ = State::Black; cnt_ = 0; } }
+                else         { cnt_ = 0; }
+                break;
+
+            case State::Black:
+                if (bw == -1) {
+                    if (cnt_ == 0) blackStart_ = globalLine_ + i;
+                    ++cnt_;
+                    if (maxBlack > 0 && cnt_ > maxBlack) {
+                        // 上限オーバー：この行から新しい連続黒として再スタート
+                        blackStart_ = globalLine_ + i;
+                        cnt_ = 1;
+                    }
+                } else {
+                    // 連続黒が途切れた。長さチェック。
+                    if (cnt_ >= minBlack && (maxBlack==0 || cnt_ <= maxBlack)) {
+                        blackEnd_ = globalLine_ + i - 1;
+                        state_ = State::SecondWhite; cnt_ = 0;
+                    } else {
+                        // 失敗：白からやり直し
+                        state_ = State::FirstWhite;
+                        cnt_ = (bw == 1) ? 1 : 0;
+                        blackStart_ = -1;
+                    }
+                }
+                break;
+
+            case State::SecondWhite:
+                if (bw == 1) { if (++cnt_ >= minSecondWhite) {
+                        out.found = true;
+                        out.blackStart = blackStart_;
+                        out.blackEnd   = blackEnd_;
+                        reset();
+                        globalLine_ += (rowMeanF.rows - (i+1));
+                        return out;
+                    } }
+                else { cnt_ = 0; }
+                break;
+            }
+
+            lastStateBW_ = bw;
+        }
+
+        globalLine_ += rowMeanF.rows;
+        return out;
+    }
+
+private:
+    enum class State { FirstWhite, Black, SecondWhite } state_;
+    int64_t globalLine_ = 0;
+    int     cnt_ = 0;
+    int64_t blackStart_ = -1, blackEnd_ = -1;
+
+    // ヒステリシスのための直前状態
+    int     lastStateBW_ = 0; // 1=white, -1=black, 0=unknown
+    // EMA
+    bool    emaValid_ = false;
+    float   ema_ = 0.f;
+};
+
+
+
 // PatternDetectorCV_Fuzzy.hpp
 #pragma once
 #include <opencv2/opencv.hpp>
