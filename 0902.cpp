@@ -1,3 +1,137 @@
+// PatternDetectorCV_Ratio.hpp
+#pragma once
+#include <opencv2/opencv.hpp>
+#include <cstdint>
+#include <cmath>
+
+class PatternDetectorCV_Ratio {
+public:
+    int firstWhiteNeeded  = 100;
+    int blackNeeded       = 200;
+    int secondWhiteNeeded = 100;
+
+    // 黒率で判定：白=黒率 < whiteMaxBlackRatio、黒=黒率 >= blackMinBlackRatio
+    // 例: 白は <0.2、黒は >=0.6 とみなす（環境に合わせて調整）
+    float whiteMaxBlackRatio = 0.2f;
+    float blackMinBlackRatio = 0.6f;
+
+    // 0: 固定二値 (binThresh>=0), 1: Otsu（推奨）
+    int binarizeMode = 1;
+    int binThresh = 128; // binarizeMode==0 のとき有効
+
+    // 列方向ROI（全幅なら x=0, w=-1）
+    int roiX = 0, roiW = -1;
+
+    struct Result {
+        bool   found = false;
+        int64_t blackStart = -1;
+        int64_t blackEnd   = -1;
+        int64_t blackCenter() const { return (blackStart>=0 && blackEnd>=0)? (blackStart+blackEnd)/2 : -1; }
+    };
+
+    void reset(){
+        state_ = State::FirstWhite; cnt_=0; globalLine_=0;
+        blackStart_=-1; blackEnd_=-1;
+    }
+    PatternDetectorCV_Ratio(){ reset(); }
+
+    // 生ポインタのブロックを投入（8bitグレイ）
+    Result pushBlock(const uint8_t* data, int width, int height, ptrdiff_t stride=-1) {
+        Result out;
+        if (!data || width<=0 || height<=0) { globalLine_ += (height>0?height:0); return out; }
+        if (stride < 0) stride = width;
+
+        // ノーコピーでMat化
+        cv::Mat block(height, width, CV_8UC1, const_cast<uint8_t*>(data), (size_t)stride);
+
+        // ROIクリップ（clamp使わない）
+        int x0 = roiX < 0 ? 0 : (roiX > width ? width : roiX);
+        int ww = (roiW>0 ? roiW : width);
+        if (ww > width - x0) ww = width - x0;
+        if (ww <= 0) { globalLine_ += height; return out; }
+
+        cv::Mat view = block(cv::Rect(x0, 0, ww, height));
+
+        // 二値化（黒=255, 白=0）
+        cv::Mat bin;
+        if (binarizeMode==1) {
+            cv::threshold(view, bin, 0, 255, cv::THRESH_BINARY_INV | cv::THRESH_OTSU);
+        } else {
+            cv::threshold(view, bin, binThresh, 255, cv::THRESH_BINARY_INV);
+        }
+
+        // 行ごとの黒率（0..1）
+        cv::Mat blackCountF;
+        cv::reduce(bin, blackCountF, 1, cv::REDUCE_AVG, CV_32F); // 0..255 の平均
+        // 255で割る→0..1
+        blackCountF /= 255.0f;
+
+        // 状態機械
+        for (int i=0;i<blackCountF.rows;i++){
+            float r = blackCountF.at<float>(i);
+            bool isWhite = (r < whiteMaxBlackRatio);
+            bool isBlack = (r >= blackMinBlackRatio);
+
+            switch(state_){
+            case State::FirstWhite:
+                if (isWhite) { if (++cnt_ >= firstWhiteNeeded) { state_=State::Black; cnt_=0; } }
+                else cnt_=0; 
+                break;
+
+            case State::Black:
+                if (isBlack) {
+                    if (cnt_==0) blackStart_ = globalLine_ + i;
+                    if (++cnt_ >= blackNeeded) { blackEnd_ = globalLine_ + i; state_=State::SecondWhite; cnt_=0; }
+                } else { cnt_=0; blackStart_=-1; } // 途中で切れたら厳密にリセット
+                break;
+
+            case State::SecondWhite:
+                if (isWhite) { if (++cnt_ >= secondWhiteNeeded) {
+                        out.found=true; out.blackStart=blackStart_; out.blackEnd=blackEnd_;
+                        reset(); globalLine_ += blackCountF.rows; return out;
+                    } }
+                else cnt_=0;
+                break;
+            }
+        }
+
+        globalLine_ += blackCountF.rows;
+        return out;
+    }
+
+private:
+    enum class State { FirstWhite, Black, SecondWhite } state_;
+    int64_t globalLine_=0;
+    int cnt_=0;
+    int64_t blackStart_=-1, blackEnd_=-1;
+};
+
+#include "PatternDetectorCV_Ratio.hpp"
+#include <vector>
+#include <iostream>
+
+int main() {
+    PatternDetectorCV_Ratio det;
+    det.firstWhiteNeeded  = 100;
+    det.blackNeeded       = 200;
+    det.secondWhiteNeeded = 100;
+    det.whiteMaxBlackRatio = 0.2f; // 白は黒率 < 20%
+    det.blackMinBlackRatio = 0.6f; // 黒は黒率 >= 60%
+    det.binarizeMode = 1;          // Otsu
+
+    // ダミー（W*H の白、途中200行だけ黒）
+    const int W=2048, H=400;
+    std::vector<uint8_t> buf(W*H, 230); // 多少グレーでもOK
+    for(int y=100;y<300;y++) std::fill_n(buf.data()+y*W, W, 20);
+
+    auto res = det.pushBlock(buf.data(), W, H, W);
+    if (res.found) {
+        std::cout << "FOUND: start="<<res.blackStart<<" end="<<res.blackEnd
+                  << " center="<<res.blackCenter()<<"\n";
+    } else {
+        std::cout << "NOT FOUND\n";
+    }
+}
 
 // PatternDetectorCV.hpp
 #pragma once
