@@ -1,4 +1,83 @@
 
+// 1行ずつ（もしくは小タイルずつ）投入して、マーカー開始yを返す。
+// 返り値：開始y（0-basedのグローバル行番号）。未確定なら負値のまま。
+struct MarkerStartDetector {
+    // パラメータ
+    int    required_on = 12;     // 連続ON必要行数（デバウンス）※環境に合わせ調整
+    double black_ratio_th = 0.55;// 黒画素率の閾値（0〜1）
+    int    bin_thresh = -1;      // 二値化閾値。-1なら大津自動（推奨：固定照明なら固定値でOK）
+    int    avg_rows = 3;         // 行の移動平均（ノイズ低減）
+
+    // 状態
+    int64_t global_line = 0;     // これまでの累積行数
+    int     on_streak = 0;       // 連続ONカウント
+    int64_t start_y = -1;        // 確定した開始y（未確定は -1）
+    std::deque<cv::Mat> row_buf; // 平均用の行バッファ（grayの1xW）
+
+    // ROI（幅方向を限定したい場合）
+    int roi_x = 0, roi_w = -1;   // -1 なら全幅
+
+    void setROI(int x, int w){ roi_x = x; roi_w = w; }
+
+    // 小タイル(複数行)でもOK。行ごとに処理。
+    void pushRows(const cv::Mat& grayRows) {
+        CV_Assert(grayRows.type()==CV_8UC1);
+        for (int y = 0; y < grayRows.rows; ++y) {
+            cv::Mat row = grayRows.row(y);
+
+            // ROI 切り出し
+            int W = row.cols;
+            int x0 = std::max(0, roi_x);
+            int ww = (roi_w>0 ? std::min(roi_w, W - x0) : W - x0);
+            cv::Mat r = row.colRange(x0, x0 + ww);
+
+            // 移動平均（行方向）：最新行をバッファして平均
+            row_buf.push_back(r.clone());
+            while ((int)row_buf.size() > avg_rows) row_buf.pop_back(); // ※単純保持（必要ならpop_frontで古い方を削除）
+            // ↑dequeの積み方は用途により前後どちらでも良い。ここでは単純に直近avg_rows行だけ持つ想定。
+
+            cv::Mat avg;
+            if ((int)row_buf.size() == avg_rows) {
+                cv::Mat acc = cv::Mat::zeros(1, r.cols, CV_32F);
+                for (auto& rr : row_buf) {
+                    cv::Mat f; rr.convertTo(f, CV_32F);
+                    acc += f;
+                }
+                acc /= (float)avg_rows;
+                acc.convertTo(avg, CV_8U);
+            } else {
+                avg = r; // たまるまで素通し
+            }
+
+            // 二値化（黒＝1）
+            cv::Mat bin;
+            if (bin_thresh < 0)
+                cv::threshold(avg, bin, 0, 255, cv::THRESH_BINARY_INV | cv::THRESH_OTSU);
+            else
+                cv::threshold(avg, bin, bin_thresh, 255, cv::THRESH_BINARY_INV);
+
+            // 黒画素率
+            int black = cv::countNonZero(bin);
+            double ratio = (double)black / (double)bin.cols;
+
+            // 連続ON 判定（黒が多い行をON）
+            bool is_on = (ratio >= black_ratio_th);
+            if (is_on) {
+                on_streak++;
+                if (on_streak == required_on && start_y < 0) {
+                    // ここで開始yを “最初のON” に戻したい場合は (global_line - required_on + 1)
+                    start_y = global_line - required_on + 1;
+                }
+            } else {
+                on_streak = 0;
+            }
+
+            global_line++; // 次の行へ
+        }
+    }
+};
+
+
 #include <opencv2/opencv.hpp>
 #include <numeric>
 
