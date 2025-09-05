@@ -1,3 +1,204 @@
+
+// PatternDetectorCV.hpp
+#pragma once
+#include <opencv2/opencv.hpp>
+#include <cstdint>
+#include <cmath>
+
+class PatternDetectorCV {
+public:
+    // ---- パラメータ ----
+    int firstWhiteNeeded  = 100;   // 最初の白 連続行数
+    int blackNeeded       = 200;   // 黒 連続行数
+    int secondWhiteNeeded = 100;   // 最後の白 連続行数
+
+    // 白判定しきい値（0..255）。-1 なら自動（背景のランニング平均 + autoOffset）
+    int   whiteThresh = 128;
+    int   autoOffset  = 0;
+
+    // 行平均の平滑（指数移動平均の係数）。0/1 で無効、>=2 で有効（大きいほどなめらか）
+    int   emaStrength = 4;
+
+    // 列方向 ROI（全幅なら x=0, w=-1）
+    int roiX = 0;
+    int roiW = -1;
+
+    struct Result {
+        bool   found = false;
+        int64_t blackStart = -1;   // 黒の開始行（global, inclusive）
+        int64_t blackEnd   = -1;   // 黒の終了行（global, inclusive）
+        int64_t blackCenter() const { return (blackStart>=0 && blackEnd>=0)? ((blackStart+blackEnd)/2) : -1; }
+    };
+
+    PatternDetectorCV(){ reset(); }
+    void reset(){
+        state_ = State::FirstWhite;
+        cnt_ = 0;
+        globalLine_ = 0;
+        blackStart_ = -1;
+        blackEnd_   = -1;
+        ema_ = std::numeric_limits<double>::quiet_NaN();
+        bgMean_ = std::numeric_limits<double>::quiet_NaN();
+    }
+
+    // ---- ポインタで渡されたブロック（高さH行）を一括処理 ----
+    // data: 先頭ポインタ（8bitグレイ）
+    // width: 1行の画素数, height: 行数, stride: バイト単位（連続なら width）
+    // 返り値: 最初に見つけたパターンのみ返す（複数検出したいならループを拡張）
+    Result pushBlock(const uint8_t* data, int width, int height, ptrdiff_t stride = -1) {
+        Result out;
+        if (!data || width<=0 || height<=0) { globalLine_ += height>0?height:0; return out; }
+        if (stride < 0) stride = width;
+
+        // ポインタに Mat ヘッダを被せる（ノーコピー）
+        cv::Mat block(height, width, CV_8UC1, const_cast<uint8_t*>(data), (size_t)stride);
+
+        // ROI を安全にクリップ
+        cv::Rect full(0, 0, width, height);
+        cv::Rect roi(roiX, 0, (roiW>0? roiW : width), height);
+        cv::Rect clipped = roi & full;
+        if (clipped.width <= 0) { globalLine_ += height; return out; }
+
+        // ROI 切り出し（ビュー：コピーなし）
+        cv::Mat view = block(clipped);
+
+        // 行平均を一括で計算（高さH × 幅Wroi → H×1 の float）
+        cv::Mat rowMeanF;
+        cv::reduce(view, rowMeanF, /*dim=*/1, cv::REDUCE_AVG, CV_32F); // 1次元方向に平均
+
+        // 1行ずつ状態機械を進める
+        for (int i = 0; i < rowMeanF.rows; ++i) {
+            double mean = rowMeanF.at<float>(i);
+
+            // EMA 平滑（任意）
+            if (emaStrength >= 2) {
+                double alpha = 1.0 / (double)emaStrength;
+                if (std::isnan(ema_)) ema_ = mean;
+                else                  ema_ = (1.0 - alpha) * ema_ + alpha * mean;
+            } else {
+                ema_ = mean;
+            }
+
+            // しきい値（固定 or 自動）
+            int thr = whiteThresh;
+            if (whiteThresh < 0) {
+                // 背景のランニング平均（白っぽいときだけゆっくり更新）
+                if (ema_ > 180.0) {
+                    if (std::isnan(bgMean_)) bgMean_ = ema_;
+                    else bgMean_ = 0.99 * bgMean_ + 0.01 * ema_;
+                } else if (std::isnan(bgMean_)) {
+                    bgMean_ = ema_;
+                }
+                thr = (int)std::round(std::clamp(bgMean_ + (double)autoOffset, 0.0, 255.0));
+            }
+
+            bool isWhite = (ema_ > thr);
+
+            switch (state_) {
+            case State::FirstWhite:
+                if (isWhite) {
+                    if (++cnt_ >= firstWhiteNeeded) {
+                        state_ = State::Black;
+                        cnt_ = 0;
+                    }
+                } else cnt_ = 0;
+                break;
+
+            case State::Black:
+                if (!isWhite) {
+                    if (cnt_ == 0) blackStart_ = globalLine_ + i;  // このブロック内のi行目
+                    if (++cnt_ >= blackNeeded) {
+                        blackEnd_ = globalLine_ + i;
+                        state_ = State::SecondWhite;
+                        cnt_ = 0;
+                    }
+                } else {
+                    // 途中で黒が切れたらリセット（厳密運用）
+                    cnt_ = 0;
+                    blackStart_ = -1;
+                }
+                break;
+
+            case State::SecondWhite:
+                if (isWhite) {
+                    if (++cnt_ >= secondWhiteNeeded) {
+                        out.found = true;
+                        out.blackStart = blackStart_;
+                        out.blackEnd   = blackEnd_;
+                        reset(); // 1パターン検出で初期化（継続検出にしたいならここを変更）
+                        // ここで return すると、このブロック中の後続パターンは見ない
+                        // 複数検出したい場合は out をリスト化し、ここでは続行に変える
+                        // ただし今回の要件では1つ出ればOK想定
+                        // ブロック末尾までの globalLine_ 加算を整合させるため、ここでは抜けずにフラグだけ立てるなら別処理が必要
+                        // シンプルに抜けちゃいます：
+                        globalLine_ += rowMeanF.rows; 
+                        return out;
+                    }
+                } else cnt_ = 0;
+                break;
+            }
+        }
+
+        globalLine_ += rowMeanF.rows;
+        return out;
+    }
+
+private:
+    enum class State { FirstWhite, Black, SecondWhite } state_;
+
+    int64_t globalLine_ = 0;
+    int     cnt_ = 0;
+    int64_t blackStart_ = -1;
+    int64_t blackEnd_   = -1;
+
+    double ema_   = std::numeric_limits<double>::quiet_NaN();
+    double bgMean_= std::numeric_limits<double>::quiet_NaN();
+};
+#include "PatternDetectorCV.hpp"
+#include <iostream>
+
+int main() {
+    PatternDetectorCV det;
+    det.firstWhiteNeeded  = 100;
+    det.blackNeeded       = 200;
+    det.secondWhiteNeeded = 100;
+
+    // 自動しきい値を使うなら
+    // det.whiteThresh = -1;
+    // det.autoOffset  = -10;
+    // det.emaStrength = 6;
+
+    // ROI を列方向で絞る場合
+    // det.roiX = 100; det.roiW = 800;
+
+    // ストリームから来たブロック（8bitグレイの生ポインタ）
+    // 例: height=1024行ずつ、幅=2048、stride=2048（連続）
+    // const uint8_t* buf = ... ;
+    // auto res = det.pushBlock(buf, 2048, 1024, 2048);
+
+    // ダミーで試すなら：
+    const int W=512, H=400;
+    std::vector<uint8_t> frame(W*H, 255);
+    auto paint = [&](int y0, int y1, uint8_t v){
+        for(int y=y0;y<=y1;y++){
+            std::fill_n(frame.data()+y*W, W, v);
+        }
+    };
+    paint(100, 299, 10); // 200行黒（100..299）
+
+    auto res = det.pushBlock(frame.data(), W, H, W);
+    if (res.found) {
+        std::cout << "FOUND: blackStart=" << res.blackStart
+                  << " blackEnd="   << res.blackEnd
+                  << " center="     << res.blackCenter()
+                  << std::endl;
+    } else {
+        std::cout << "not found\n";
+    }
+}
+
+
+
 // PatternDetector.hpp
 #pragma once
 #include <cstdint>
