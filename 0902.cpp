@@ -1,3 +1,197 @@
+// PatternDetector.hpp
+#pragma once
+#include <cstdint>
+#include <cstddef>
+#include <cmath>
+#include <algorithm>
+
+class PatternDetector {
+public:
+    // --- パラメータ（必要に応じて調整） ---
+    int firstWhiteNeeded  = 100;     // 先頭の白 連続行数
+    int blackNeeded       = 200;     // 黒帯 連続行数
+    int secondWhiteNeeded = 100;     // 後続の白 連続行数
+
+    // 白/黒判定用
+    // 平均輝度 > whiteThresh なら「白」。固定値 or 自動しきい（-1）を選択。
+    int whiteThresh = 128;           // 0..255。-1 なら自動（ランニング平均+オフセット）
+    int autoOffset  = 0;             // 自動時：基準に足す/引くオフセット（例：-10）
+
+    // ノイズ抑制：移動平均（行の平均値に対して）
+    // 0 なら無効、1 ならそのまま、2 以上で指数移動平均(EWMA)
+    int emaStrength = 4;             // 推奨: 4〜8（大きいほどなめらか）
+
+    // 列方向ROI（全幅を見るなら x0=0, w=-1）
+    int roiX = 0;
+    int roiW = -1;
+
+    struct Result {
+        bool   found = false;
+        int64_t blackStart = -1;   // 黒の開始行 (inclusive)
+        int64_t blackEnd   = -1;   // 黒の終了行 (inclusive)
+        int64_t blackCenter() const { return (blackStart >= 0 && blackEnd >= 0) ? ((blackStart + blackEnd)/2) : -1; }
+    };
+
+    // 状態を初期化
+    void reset() {
+        state_ = State::FirstWhite;
+        cnt_ = 0;
+        globalLine_ = 0;
+        blackStart_ = -1;
+        blackEnd_ = -1;
+        ema_ = NAN;
+        bgMean_ = NAN;
+    }
+
+    PatternDetector() { reset(); }
+
+    // 1行ずつ投入（8bitグレイ配列）。返り値で検出完了を通知。
+    // row: 行先頭ポインタ / width: 全体の列数 / stride: バイト単位（連続なら width）
+    Result pushLine(const uint8_t* row, int width, int stride = -1) {
+        if (stride < 0) stride = width;
+        Result out;
+
+        // --- ROI 適用 ---
+        int x0 = std::clamp(roiX, 0, width);
+        int ww = (roiW > 0) ? std::min(roiW, width - x0) : (width - x0);
+        if (ww <= 0) { ++globalLine_; return out; }
+
+        // --- 行の平均輝度を計算（ROI 内） ---
+        const uint8_t* p = row + x0;
+        uint64_t sum = 0;
+        for (int i = 0; i < ww; ++i) sum += p[i];
+        double mean = static_cast<double>(sum) / ww;
+
+        // --- EMA による平滑化（オプション）---
+        if (emaStrength >= 2) {
+            double alpha = 1.0 / static_cast<double>(emaStrength);
+            if (std::isnan(ema_)) ema_ = mean;
+            else                  ema_ = (1.0 - alpha) * ema_ + alpha * mean;
+        } else {
+            ema_ = mean;
+        }
+
+        // --- しきい値決定：固定 or 自動 ---
+        int thr = whiteThresh;
+        if (whiteThresh < 0) {
+            // 自動：背景ランニング平均（白寄りのときに更新）＋オフセット
+            if (isWhiteByFixed(ema_, 180)) {  // かなり白めのときに背景を更新（経験則）
+                if (std::isnan(bgMean_)) bgMean_ = ema_;
+                else bgMean_ = 0.99 * bgMean_ + 0.01 * ema_;
+            } else if (std::isnan(bgMean_)) {
+                bgMean_ = ema_; // 初期値
+            }
+            thr = static_cast<int>(std::clamp(bgMean_ + autoOffset, 0.0, 255.0));
+        }
+
+        bool isWhite = (ema_ > thr);
+
+        // --- ステートマシン ---
+        switch (state_) {
+        case State::FirstWhite:
+            if (isWhite) {
+                if (++cnt_ >= firstWhiteNeeded) {
+                    state_ = State::Black;
+                    cnt_ = 0;
+                }
+            } else cnt_ = 0;
+            break;
+
+        case State::Black:
+            if (!isWhite) {
+                if (cnt_ == 0) blackStart_ = globalLine_; // 最初の黒行を記録
+                cnt_++;
+                if (cnt_ >= blackNeeded) {
+                    blackEnd_ = globalLine_;              // 200本目の黒行
+                    state_ = State::SecondWhite;
+                    cnt_ = 0;
+                }
+            } else {
+                // 黒が途切れた → リセット（厳密運用）
+                cnt_ = 0;
+                blackStart_ = -1;
+            }
+            break;
+
+        case State::SecondWhite:
+            if (isWhite) {
+                if (++cnt_ >= secondWhiteNeeded) {
+                    out.found = true;
+                    out.blackStart = blackStart_;
+                    out.blackEnd = blackEnd_;
+                    reset(); // 1パターン検出でリセット（連続検出したいなら適宜変更）
+                }
+            } else cnt_ = 0;
+            break;
+        }
+
+        ++globalLine_;
+        return out;
+    }
+
+private:
+    enum class State { FirstWhite, Black, SecondWhite } state_;
+
+    // 内部状態
+    int64_t globalLine_ = 0;
+    int     cnt_ = 0;
+    int64_t blackStart_ = -1;
+    int64_t blackEnd_   = -1;
+
+    // 平滑化・背景
+    double ema_ = NAN;     // 行平均の指数移動平均
+    double bgMean_ = NAN;  // 背景（白側）のランニング平均
+
+    static bool isWhiteByFixed(double mean, int thr) { return mean > thr; }
+};
+
+
+#include "PatternDetector.hpp"
+#include <vector>
+#include <iostream>
+
+int main() {
+    PatternDetector det;
+
+    // 必要なら調整
+    det.firstWhiteNeeded  = 100;
+    det.blackNeeded       = 200;
+    det.secondWhiteNeeded = 100;
+
+    // 自動しきい値を使うなら：
+    // det.whiteThresh = -1;   // 自動
+    // det.autoOffset  = -10;  // 背景より少し低めに設定して白判定を甘く
+    // det.emaStrength = 6;    // 行平均を平滑化
+
+    // 列方向の ROI を使うなら：
+    // det.roiX = 100; det.roiW = 800;
+
+    // ダミーデータ：ここでは幅 W の白/黒ラインを用意して順に投入する想定
+    const int W = 2048;
+    std::vector<uint8_t> white(W, 255);
+    std::vector<uint8_t> black(W, 10);
+
+    auto feed = [&](const std::vector<uint8_t>& line, int n){
+        for (int i=0;i<n;i++) {
+            auto res = det.pushLine(line.data(), W);
+            if (res.found) {
+                std::cout << "FOUND: blackStart=" << res.blackStart
+                          << " blackEnd=" << res.blackEnd
+                          << " blackCenter=" << res.blackCenter()
+                          << std::endl;
+            }
+        }
+    };
+
+    feed(white, 100);
+    feed(black, 200);
+    feed(white, 100);
+    return 0;
+}
+
+
+
+
 
 // 1行ずつ（もしくは小タイルずつ）投入して、マーカー開始yを返す。
 // 返り値：開始y（0-basedのグローバル行番号）。未確定なら負値のまま。
