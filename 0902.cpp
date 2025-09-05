@@ -1,4 +1,201 @@
 
+// Sliding4BlocksStrict.hpp
+#pragma once
+#include <opencv2/opencv.hpp>
+#include <deque>
+#include <cstdint>
+
+class Sliding4BlocksStrict {
+public:
+    // 期待パターン: 白(>=minFirstWhite) → 黒(連続[minBlack,maxBlack]) → 白(>=minSecondWhite)
+    int   minFirstWhite  = 100;
+    int   minBlack       = 200;   // 連続黒 下限
+    int   maxBlack       = 300;   // 連続黒 上限
+    int   minSecondWhite = 100;
+
+    // 二値化：1=Otsu（推奨：4ブロックまとめて）、0=固定しきい（binThresh 使用）
+    int   binarizeMode = 1;
+    int   binThresh    = 120;     // 照明が安定なら固定の方が再現性UP
+
+    // 縦方向ぼかし（白スジつぶし）。0/1=無効、奇数で推奨 31/51/61 など
+    int   verticalBlurK = 51;
+
+    // 黒/白のプロファイル判定（黒率 r ∈[0,1]）
+    float whiteMaxBlackRatio = 0.20f; // 白判定： r < 0.20
+    float blackMinBlackRatio = 0.60f; // 黒判定： r >= 0.60
+
+    // 1Dプロファイルの移動平均窓（縦方向）。0/1=無効、奇数で 31/51/… 推奨
+    int   profileSmoothW = 31;
+
+    // 列方向 ROI（全幅: x=0, w=-1）
+    int   roiX = 0, roiW = -1;
+
+    struct Result {
+        bool    found=false;
+        int64_t blackStart=-1;  // グローバル行（inclusive）
+        int64_t blackEnd=-1;    // グローバル行（inclusive）
+        int64_t blackCenter() const { return (found? (blackStart+blackEnd)/2 : -1); }
+    };
+
+    Sliding4BlocksStrict():blockW_(0),blockH_(0),globalBaseLine_(0){}
+
+    // 生ポインタのブロックを追加。幅W/高さH/stride（連続ならW）
+    // ブロックサイズは一定である前提（ラインセンサの典型仕様）
+    Result pushBlock(const uint8_t* data, int W, int H, ptrdiff_t stride=-1){
+        Result out;
+        if (!data || W<=0 || H<=0) return out;
+        if (stride < 0) stride = W;
+
+        // 受け取ったポインタに Mat ヘッダを被せる（コピー無し）
+        cv::Mat m(H, W, CV_8UC1, const_cast<uint8_t*>(data), (size_t)stride);
+
+        // 初回のサイズ決定
+        if (blocks_.empty()) { blockW_ = W; blockH_ = H; }
+
+        // ROI を安全にクリップ
+        int x0 = (roiX<0)?0:(roiX>W?W:roiX);
+        int ww = (roiW>0? roiW : W);
+        if (ww > W - x0) ww = W - x0;
+        if (ww <= 0) { globalBaseLine_ += H; return out; }
+
+        // ROI ビューを保存（コピー無し）。ただし元ポインタの寿命に注意。
+        blocks_.push_back(m(cv::Rect(x0, 0, ww, H)).clone()); 
+        // ↑ 上流バッファの寿命が短い場合も安全にするため、ここは clone() で確保。
+        //   もし寿命保証されるなら clone を外しコピー無しでOK（速度↑メモリ↓）
+
+        // 4個溜まるまで待つ
+        if (blocks_.size() < 4) { globalBaseLine_ += H; return out; }
+
+        // 4個を縦に結合（コピー）
+        cv::Mat big;
+        cv::vconcat(std::vector<cv::Mat>{blocks_[0],blocks_[1],blocks_[2],blocks_[3]}, big);
+
+        // --- 二値化（黒=255, 白=0） ---
+        cv::Mat bin;
+        if (binarizeMode==1) {
+            cv::threshold(big, bin, 0, 255, cv::THRESH_BINARY_INV | cv::THRESH_OTSU);
+        } else {
+            cv::threshold(big, bin, binThresh, 255, cv::THRESH_BINARY_INV);
+        }
+
+        // --- 縦方向だけ強ぼかし（任意） ---
+        if (verticalBlurK >= 3 && (verticalBlurK%2)==1) {
+            cv::boxFilter(bin, bin, -1, cv::Size(1, verticalBlurK), cv::Point(-1,-1), true, cv::BORDER_REPLICATE);
+        }
+
+        // --- 行ごとの黒率プロファイル r(y) ∈ [0,1] を作る ---
+        cv::Mat rF; // (4H)×1, float
+        cv::reduce(bin, rF, 1, cv::REDUCE_AVG, CV_32F);
+        rF /= 255.0f;
+
+        // --- 1D 平滑（任意） ---
+        if (profileSmoothW >= 3 && (profileSmoothW%2)==1) {
+            cv::blur(rF, rF, cv::Size(1, profileSmoothW));
+        }
+
+        // --- 厳格な連続 [minBlack, maxBlack] 検索（前後の白も条件に含める） ---
+        // まず白区間 >= minFirstWhite を探す
+        int fourH = rF.rows;
+        int i = 0;
+        while (i < fourH) {
+            // 白ラン
+            int w1 = 0;
+            while (i < fourH && rF.at<float>(i) < whiteMaxBlackRatio) { ++w1; ++i; }
+            if (w1 < minFirstWhite) { ++i; continue; } // 条件未達→次へ
+
+            // 黒ラン（連続のみ）
+            int b = 0; int bStartIdx = i;
+            while (i < fourH && rF.at<float>(i) >= blackMinBlackRatio) { ++b; ++i; }
+            if (b >= minBlack && b <= maxBlack) {
+                // 後続の白ラン
+                int w2 = 0; int j = i;
+                while (j < fourH && rF.at<float>(j) < whiteMaxBlackRatio) { ++w2; ++j; }
+                if (w2 >= minSecondWhite) {
+                    out.found = true;
+                    out.blackStart = globalBaseLine_ - (3LL * blockH_) + bStartIdx; // 窓先頭のグローバル行 = base - 3H
+                    out.blackEnd   = out.blackStart + (b - 1);
+                    // 検出したら状態を初期化（連続検出したいなら適宜変更）
+                    resetWindowAfterHit();
+                    // 4ブロック“使い切った”わけではないので、次回の base を正しく進める：
+                    globalBaseLine_ += H; // 今回分の新規ブロックぶん進める
+                    // スライド（1ブロック捨てて次へ）
+                    slideWindow();
+                    return out;
+                }
+            }
+            // 条件を満たさなかった場合、次の候補へ
+        }
+
+        // 検出できなかった：1ブロック分スライド
+        globalBaseLine_ += H;
+        slideWindow();
+        return out;
+    }
+
+    void setBlockSizeHint(int W, int H){ blockW_=W; blockH_=H; }
+
+private:
+    // 先頭ブロックを捨てる
+    void slideWindow(){
+        if (!blocks_.empty()) blocks_.pop_front();
+    }
+    void resetWindowAfterHit(){
+        blocks_.clear();
+    }
+
+    std::deque<cv::Mat> blocks_; // ROI後の各ブロック（高さ=BH, 幅=ROI幅）
+    int blockW_, blockH_;
+    // 直近 pushBlock 呼び出し時点を最下段としたとき、
+    // 4ブロック窓の先頭（最上段）のグローバル行は (globalBaseLine_ - 3*BH)
+    int64_t globalBaseLine_;
+};
+
+#include "Sliding4BlocksStrict.hpp"
+#include <vector>
+#include <iostream>
+
+int main(){
+    Sliding4BlocksStrict det;
+    det.minFirstWhite  = 100;
+    det.minBlack       = 200;
+    det.maxBlack       = 300;
+    det.minSecondWhite = 100;
+    det.binarizeMode   = 1;   // Otsu（4ブロックまとめた窓）
+    det.verticalBlurK  = 51;  // 縦強ぼかし（白スジ潰し）
+    det.profileSmoothW = 31;  // プロファイルも少し平滑
+    // det.roiX = 100; det.roiW = 800; // 必要なら列方向ROI
+
+    // ダミー：各ブロック高さBH=128、幅W=1024 とする
+    const int W=1024, BH=128;
+    auto makeBlock = [&](int startBlackY, int endBlackY, int blockIndex){
+        std::vector<uint8_t> v(W*BH, 235); // 白
+        int base = blockIndex*BH;
+        for(int y=0;y<BH;y++){
+            int gy = base + y;
+            if (gy>=startBlackY && gy<=endBlackY)
+                std::fill_n(v.data()+y*W, W, 20); // 黒
+        }
+        return v;
+    };
+
+    // 4ブロックめで黒帯が完成する（例：白100→黒240→白100）
+    std::vector<std::vector<uint8_t>> blocks;
+    for(int k=0;k<6;k++){
+        blocks.push_back(makeBlock(100, 339, k)); // 240行黒（100..339）
+    }
+
+    for (int k=0;k<(int)blocks.size();k++){
+        auto res = det.pushBlock(blocks[k].data(), W, BH, W);
+        if (res.found) {
+            std::cout << "FOUND: start=" << res.blackStart
+                      << " end=" << res.blackEnd
+                      << " center=" << res.blackCenter() << "\n";
+        }
+    }
+}
+
+
+
 
 // Otsu 二値（黒→255）※反転しないなら、後の判定ロジックを合わせてね
 cv::Mat bin;
