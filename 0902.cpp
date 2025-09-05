@@ -1,4 +1,13 @@
 
+
+Windows Registry Editor Version 5.00
+
+[HKEY_LOCAL_MACHINE\SOFTWARE\Microsoft\Windows\Windows Error Reporting\LocalDumps\YourApp.exe]
+"DumpFolder"="C:\\Dumps"
+"DumpType"=dword:00000002
+"DumpCount"=dword:0000000a
+
+
 using System;
 using System.Drawing;
 using System.Windows.Forms;
