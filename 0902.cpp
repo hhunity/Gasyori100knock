@@ -1,4 +1,81 @@
 
+#include <opencv2/opencv.hpp>
+#include <numeric>
+
+// マーカ帯の開始点の y を返す。見つからなければ NaN を返す。
+// expectedWidthPx: 帯の見かけ短辺（例: 200）
+// roi: 画像の一部だけ見たい場合に指定（なければ全体）
+float GetMarkerStartY(const cv::Mat& bgr, float expectedWidthPx = 200.0f,
+                      const cv::Rect& roi = cv::Rect())
+{
+    CV_Assert(!bgr.empty());
+
+    // ---- 1) ROI 切り出し ----
+    cv::Rect R = roi.area() > 0 ? roi : cv::Rect(0,0,bgr.cols,bgr.rows);
+    cv::Mat src = bgr(R).clone();
+
+    // ---- 2) 黒抽出（二値化）+ モルフォロジー ----
+    cv::Mat gray; cv::cvtColor(src, gray, cv::COLOR_BGR2GRAY);
+    cv::GaussianBlur(gray, gray, cv::Size(5,5), 1.0);
+    cv::Mat bin;
+    cv::threshold(gray, bin, 0, 255, cv::THRESH_BINARY_INV | cv::THRESH_OTSU);
+
+    // 200px級の帯が欠けても繋がる程度にクロージング
+    cv::Mat k = cv::getStructuringElement(cv::MORPH_RECT, cv::Size(9,9));
+    cv::morphologyEx(bin, bin, cv::MORPH_CLOSE, k, cv::Point(-1,-1), 1);
+
+    // ---- 3) 輪郭抽出 ----
+    std::vector<std::vector<cv::Point>> contours;
+    cv::findContours(bin, contours, cv::RETR_EXTERNAL, cv::CHAIN_APPROX_SIMPLE);
+    if (contours.empty()) return std::numeric_limits<float>::quiet_NaN();
+
+    // ---- 4) minAreaRect で「太い帯」候補を選ぶ ----
+    int best = -1; double bestScore = -1;
+    const float wMin = expectedWidthPx * 0.8f;   // 200±20% は適宜調整
+    const float wMax = expectedWidthPx * 1.2f;
+    const float aspectMin = 3.0f;                // 短辺の3倍以上を帯らしさの目安
+
+    for (int i=0;i<(int)contours.size();++i){
+        if (contours[i].size() < 20) continue;
+        cv::RotatedRect rr = cv::minAreaRect(contours[i]);
+        float a = rr.size.width, b = rr.size.height;
+        float shortSide = std::min(a,b), longSide = std::max(a,b);
+        if (shortSide < wMin || shortSide > wMax) continue;
+        if (longSide/shortSide < aspectMin) continue;
+
+        double score = (double)longSide; // より長い帯を優先
+        if (score > bestScore){ bestScore = score; best = i; }
+    }
+    if (best < 0) return std::numeric_limits<float>::quiet_NaN();
+
+    // ---- 5) サブピクセル直線フィット ----
+    cv::Vec4f lineParam;
+    cv::fitLine(contours[best], lineParam, cv::DIST_L2, 0, 0.01, 0.01);
+    cv::Point2f d(lineParam[0], lineParam[1]);     // 方向ベクトル（ほぼ単位）
+    cv::Point2f p0(lineParam[2], lineParam[3]);    // 直線上の一点（重心付近）
+
+    // 正規化（fitLine の d は単位長に近いが、厳密に合わせておく）
+    float dl = std::sqrt(d.x*d.x + d.y*d.y);
+    if (dl < 1e-9f) return std::numeric_limits<float>::quiet_NaN();
+    d.x /= dl; d.y /= dl;
+
+    // ---- 6) 輪郭点を直線に射影 → 最小射影値を「開始点」と定義 ----
+    // t = (pt - p0)・d    （・は内積）
+    float bestT = std::numeric_limits<float>::infinity();
+    cv::Point2f bestPt;
+    for (auto &pt : contours[best]){
+        cv::Point2f fpt((float)pt.x, (float)pt.y);
+        cv::Point2f v = fpt - p0;
+        float t = v.x*d.x + v.y*d.y;
+        if (t < bestT){ bestT = t; bestPt = fpt; }
+    }
+
+    // 画像全体座標系の y に戻す（ROI オフセット加算）
+    return bestPt.y + (float)R.y;
+}
+
+
+
 
 Windows Registry Editor Version 5.00
 
