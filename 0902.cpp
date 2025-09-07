@@ -1,4 +1,90 @@
 
+// DetectorAPI.h
+#pragma once
+#include <cstdint>
+
+#ifdef _WIN32
+  #define DLL_EXPORT __declspec(dllexport)
+#else
+  #define DLL_EXPORT
+#endif
+
+extern "C" {
+
+// Detector インスタンス作成 / 解放
+DLL_EXPORT void* CreateDetector();
+DLL_EXPORT void  DestroyDetector(void* handle);
+
+// パラメータ設定
+DLL_EXPORT void  SetMinWhite(void* handle, int firstWhite, int secondWhite);
+DLL_EXPORT void  SetBlackRange(void* handle, int minBlack, int maxBlack);
+
+// 1ブロック追加して判定実行
+// data: 8bit グレイ, width×height, stride バイト
+// 結果: 1=found, 0=not found
+DLL_EXPORT int   PushBlock(void* handle,
+                           const uint8_t* data,
+                           int width,
+                           int height,
+                           int stride,
+                           int64_t* blackStart,
+                           int64_t* blackEnd);
+
+}
+
+// DetectorAPI.cpp
+#include "DetectorAPI.h"
+#include "PatternDetectorCV_IntensityStrict.hpp"  // ←これまで作った検出器クラス
+
+struct DetectorWrapper {
+    PatternDetectorCV_IntensityStrict det;
+};
+
+extern "C" {
+
+DLL_EXPORT void* CreateDetector() {
+    return new DetectorWrapper();
+}
+
+DLL_EXPORT void DestroyDetector(void* handle) {
+    delete static_cast<DetectorWrapper*>(handle);
+}
+
+DLL_EXPORT void SetMinWhite(void* handle, int firstWhite, int secondWhite) {
+    auto* w = static_cast<DetectorWrapper*>(handle);
+    w->det.minFirstWhite  = firstWhite;
+    w->det.minSecondWhite = secondWhite;
+}
+
+DLL_EXPORT void SetBlackRange(void* handle, int minBlack, int maxBlack) {
+    auto* w = static_cast<DetectorWrapper*>(handle);
+    w->det.minBlack = minBlack;
+    w->det.maxBlack = maxBlack;
+}
+
+DLL_EXPORT int PushBlock(void* handle,
+                         const uint8_t* data,
+                         int width,
+                         int height,
+                         int stride,
+                         int64_t* blackStart,
+                         int64_t* blackEnd)
+{
+    auto* w = static_cast<DetectorWrapper*>(handle);
+    auto res = w->det.pushBlock(data, width, height, stride);
+    if (res.found) {
+        if (blackStart) *blackStart = res.blackStart;
+        if (blackEnd)   *blackEnd   = res.blackEnd;
+        return 1;
+    }
+    return 0;
+}
+
+} // extern "C"
+
+
+
+
 int fourH = rF.rows;
 int i = 0;
 
