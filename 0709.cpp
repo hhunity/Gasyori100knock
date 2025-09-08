@@ -1,3 +1,25 @@
+public bool TryGetWindowPtr(long startRow, int winW, int winH, int x0,
+                            out IntPtr ptr, out int strideBytes)
+{
+    if (_disposed) throw new ObjectDisposedException(nameof(LineStore));
+    ptr = IntPtr.Zero;
+    strideBytes = RowBytes;
+
+    if (winW <= 0 || winH <= 0 || winW > Width) return false;
+    if (startRow < 0) return false;
+
+    long h = Interlocked.Read(ref _head);
+    // まだ startRow+winH 行まで入っていない場合は失敗
+    if (h < startRow + winH) return false;
+
+    int x0Clamped = (x0 < 0) ? 0 : (x0 > Width - winW ? Width - winW : x0);
+    long byteOffset = startRow * RowBytes + (long)x0Clamped * ElemSizeBytes;
+    ptr = (IntPtr)((byte*)_buf + byteOffset);
+    return true;
+}
+
+
+
 public static int Clamp(int value, int min, int max)
 {
     if (value < min) return min;
