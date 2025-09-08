@@ -1,6 +1,4 @@
-// LineStore.cs
-// 固定長の巨大バッファへ 2048xH ブロックを追記し、
-// 最新の winW x winH 窓を “ポインタ＋ストライド” でゼロコピー取得するためのユーティリティ。
+// LineStore.cs (エラーハンドリング強化版)
 using System;
 using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
@@ -12,24 +10,23 @@ namespace YourApp.Imaging
 
     public unsafe sealed class LineStore : IDisposable
     {
-        public int Width { get; }                 // 例: 2048
-        public long CapacityLines { get; }        // 例: 512行/秒 × 保持秒数
+        public int Width { get; }
+        public long CapacityLines { get; }
         public PixelType PixelType { get; }
-        public int ElemSizeBytes { get; }         // 1(8bit) or 2(16bit)
+        public int ElemSizeBytes { get; }
         public int RowBytes => Width * ElemSizeBytes;
 
-        private IntPtr _buf;                      // [CapacityLines x Width] 連続領域（row-major）
-        private volatile long _head;              // これまでに書き込んだ総行数（0..CapacityLines）
+        private IntPtr _buf;
+        private volatile long _head;
         private bool _disposed;
 
         /// <summary>
-        /// 固定長の線形ストアを作成します。先頭から詰めるだけで wrap しません。
+        /// 直接 new する場合は OutOfMemoryException を上位へ投げます。
+        /// 失敗時に落ち着いて扱いたい場合は TryCreate を使ってください。
         /// </summary>
-        /// <param name="width">画素横幅（例: 2048）</param>
-        /// <param name="capacityLines">保持する総行数（例: 512 * 保持秒）</param>
-        /// <param name="pt">画素型（8bit/16bit）</param>
         public LineStore(int width, long capacityLines, PixelType pt)
         {
+            if (IntPtr.Size == 4) throw new PlatformNotSupportedException("x64 ビルドで使用してください。");
             if (width <= 0) throw new ArgumentOutOfRangeException(nameof(width));
             if (capacityLines <= 0) throw new ArgumentOutOfRangeException(nameof(capacityLines));
 
@@ -38,16 +35,46 @@ namespace YourApp.Imaging
             PixelType = pt;
             ElemSizeBytes = (pt == PixelType.U8) ? 1 : 2;
 
-            long totalBytes = CapacityLines * RowBytes;
-            if (IntPtr.Size == 4)
-                throw new PlatformNotSupportedException("x64 ビルドで使用してください。");
-            if (totalBytes <= 0)
-                throw new ArgumentOutOfRangeException(nameof(capacityLines), "容量が大きすぎるかオーバーフローしました。");
+            checked
+            {
+                long totalBytes = CapacityLines * (long)RowBytes;
+                if (totalBytes <= 0) throw new ArgumentOutOfRangeException(nameof(capacityLines), "サイズ計算がオーバーフローしました。");
 
-            _buf = Marshal.AllocHGlobal(new IntPtr(totalBytes));
-            // 初期化（任意。巨大なら省略可）
-            //Unsafe.InitBlockUnaligned((void*)_buf, 0, (uint)Math.Min(totalBytes, int.MaxValue));
+                try
+                {
+                    _buf = Marshal.AllocHGlobal((nint)totalBytes); // 失敗時は OutOfMemoryException
+                }
+                catch (OutOfMemoryException oom)
+                {
+                    throw new InsufficientMemoryException(
+                        $"LineStore: {totalBytes / (1024.0 * 1024.0):F1} MiB の確保に失敗しました。width={Width}, lines={CapacityLines}, bytes/row={RowBytes}.",
+                        oom);
+                }
+            }
+
+            // 初期化は任意（巨大確保時は重いので通常は省略推奨）
+            // Unsafe.InitBlockUnaligned((void*)_buf, 0, (uint)Math.Min(totalBytes, int.MaxValue));
+
             _head = 0;
+        }
+
+        /// <summary>
+        /// 例外を投げない作成API。成功すれば store!=null で true。失敗時は false と error に理由。
+        /// </summary>
+        public static bool TryCreate(int width, long capacityLines, PixelType pt,
+                                     out LineStore? store, out string? error)
+        {
+            store = null; error = null;
+            try
+            {
+                store = new LineStore(width, capacityLines, pt);
+                return true;
+            }
+            catch (Exception ex) when (ex is OutOfMemoryException || ex is InsufficientMemoryException || ex is ArgumentOutOfRangeException)
+            {
+                error = ex.Message;
+                return false;
+            }
         }
 
         public void Dispose()
@@ -58,28 +85,20 @@ namespace YourApp.Imaging
             _disposed = true;
         }
 
-        /// <summary>
-        /// 2048xH のブロックを先頭から順に追記します。容量を超える場合は false を返します。
-        /// </summary>
-        /// <param name="src">ブロック先頭行のポインタ</param>
-        /// <param name="rows">ブロック行数（例: 512）</param>
-        /// <param name="strideBytes">入力1行のバイト数（推奨: RowBytes）</param>
-        /// <returns>書き込めたら true、容量超過で未書込なら false</returns>
         public bool PushBlock(IntPtr src, int rows, int strideBytes)
         {
             if (_disposed) throw new ObjectDisposedException(nameof(LineStore));
+            if (src == IntPtr.Zero) throw new ArgumentNullException(nameof(src));
             if (rows <= 0) return true;
             if (strideBytes < RowBytes) throw new ArgumentException("stride too small", nameof(strideBytes));
-            if (src == IntPtr.Zero) throw new ArgumentNullException(nameof(src));
 
             long start = _head;
             long end = start + rows;
-            if (end > CapacityLines) return false; // wrap しない運用
+            if (end > CapacityLines) return false; // 固定長: これ以上は貯めない
 
             byte* dstBase = (byte*)_buf + start * RowBytes;
             byte* srcBase = (byte*)src;
 
-            // ★ 行ピッチが一致するなら一括コピー（最速）
             if (strideBytes == RowBytes)
             {
                 long bytes = (long)rows * RowBytes;
@@ -87,7 +106,6 @@ namespace YourApp.Imaging
             }
             else
             {
-                // パディングありの場合のみ行ごとコピー
                 for (int i = 0; i < rows; i++)
                 {
                     Buffer.MemoryCopy(
@@ -97,40 +115,26 @@ namespace YourApp.Imaging
                 }
             }
 
-            Interlocked.Exchange(ref _head, end);
+            Interlocked.Exchange(ref _head, end); // publish
             return true;
         }
 
-        /// <summary>
-        /// これまでに書いた総行数（先頭からの実データ行数）を返します。
-        /// </summary>
         public long HeadLines => Interlocked.Read(ref _head);
 
-        /// <summary>
-        /// 最新 winH 行のうち、横 [x0, x0+winW) のウィンドウの先頭アドレスと行ストライドを返します（ゼロコピー）。
-        /// 戻り値 true のとき、ptr は該当ウィンドウの左上画素を指し、strideBytes は 2048×elem です。
-        /// </summary>
-        /// <param name="winW">ウィンドウ幅（例: 725）</param>
-        /// <param name="winH">ウィンドウ高さ（例: 725）</param>
-        /// <param name="x0">横開始位置（0..Width-winW）</param>
-        /// <param name="ptr">出力: 先頭画素ポインタ（ゼロコピー）</param>
-        /// <param name="strideBytes">出力: 行ストライド（= RowBytes）</param>
         public bool TryGetLatestWindowPtr(int winW, int winH, int x0, out IntPtr ptr, out int strideBytes)
         {
+            if (_disposed) throw new ObjectDisposedException(nameof(LineStore));
             ptr = IntPtr.Zero;
             strideBytes = RowBytes;
 
-            if (_disposed) throw new ObjectDisposedException(nameof(LineStore));
-            if (winW <= 0 || winH <= 0) return false;
-            if (winW > Width) return false;
+            if (winW <= 0 || winH <= 0 || winW > Width) return false;
 
-            long h = HeadLines;
-            if (h < winH) return false; // まだ行が足りない
+            long h = Interlocked.Read(ref _head);
+            if (h < winH) return false;
 
             int x0Clamped = Math.Clamp(x0, 0, Math.Max(0, Width - winW));
             long topRow = h - winH;
 
-            // wrap なし設計なので、最新 winH 行は常に連続領域。
             long byteOffset = topRow * RowBytes + (long)x0Clamped * ElemSizeBytes;
             ptr = (IntPtr)((byte*)_buf + byteOffset);
             return true;
