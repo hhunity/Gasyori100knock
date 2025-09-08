@@ -46,7 +46,7 @@ namespace YourApp.Imaging
 
             _buf = Marshal.AllocHGlobal(new IntPtr(totalBytes));
             // 初期化（任意。巨大なら省略可）
-            Unsafe.InitBlockUnaligned((void*)_buf, 0, (uint)Math.Min(totalBytes, int.MaxValue));
+            //Unsafe.InitBlockUnaligned((void*)_buf, 0, (uint)Math.Min(totalBytes, int.MaxValue));
             _head = 0;
         }
 
