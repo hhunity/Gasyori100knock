@@ -1,3 +1,218 @@
+
+// ===== ここから: PNG 保存API =====
+
+// 最新 rows 行を PNG 保存（必要なら複数ファイルに分割）
+// 例: SaveLatestToPng(725, 0, 725, @"C:\out\latest.png");
+public unsafe bool SaveLatestToPng(int rows, int x0, int winW, string basePath,
+                                   int maxRowsPerImage /*例: 16384*/, out string error,
+                                   bool normalize16To8 = true)
+{
+    error = null;
+    if (rows <= 0) { error = "rows <= 0"; return false; }
+
+    long avail = StoredLines;
+    if (avail < rows) { error = "not enough lines"; return false; }
+
+    long startRow = avail - rows;
+    return SaveRangeToPng(startRow, rows, x0, winW, basePath, maxRowsPerImage, out error, normalize16To8);
+}
+
+// 任意範囲を PNG 保存（必要なら複数ファイルに分割）
+// basePath が "foo.png" のとき、分割時は "foo_p0001.png" のように出力
+public unsafe bool SaveRangeToPng(long startRow, int rows, int x0, int winW, string basePath,
+                                  int maxRowsPerImage /*例: 16384*/, out string error,
+                                  bool normalize16To8 = true)
+{
+    error = null;
+    if (_disposed) { error = "disposed"; return false; }
+    if (startRow < 0 || rows <= 0) { error = "invalid start/rows"; return false; }
+    if (winW <= 0 || winW > Width) { error = "invalid width"; return false; }
+
+    long avail = StoredLines;
+    if (startRow + rows > avail) { error = "range exceeds stored lines"; return false; }
+
+    IntPtr p; int stride;
+    if (!TryGetWindowPtr(startRow, winW, rows, x0, out p, out stride))
+    {
+        error = "TryGetWindowPtr failed"; return false;
+    }
+
+    // 出力先フォルダ作成
+    string dir = Path.GetDirectoryName(basePath);
+    if (!string.IsNullOrEmpty(dir)) Directory.CreateDirectory(dir);
+
+    if (PixelType == PixelType.U8)
+    {
+        Save8bppGrayStripes((byte*)p, rows, winW, stride, basePath, maxRowsPerImage);
+        return true;
+    }
+    else // U16
+    {
+        if (normalize16To8)
+        {
+            Save16to8Stripes((byte*)p, rows, winW, stride, basePath, maxRowsPerImage, false /*minmax*/);
+            return true;
+        }
+        else
+        {
+            // 上位8bit抽出ではなく min-max 正規化したい場合は第6引数を true に
+            Save16to8Stripes((byte*)p, rows, winW, stride, basePath, maxRowsPerImage, true /*minmax*/);
+            return true;
+        }
+    }
+}
+
+// ===== 内部実装: 8bitグレースケール（ストライプ分割） =====
+private static unsafe void Save8bppGrayStripes(byte* srcTop, int rows, int cols, int srcStrideBytes,
+                                               string basePath, int maxRowsPerImage)
+{
+    int parts = (rows + maxRowsPerImage - 1) / maxRowsPerImage;
+    string dir = Path.GetDirectoryName(basePath);
+    string name = Path.GetFileNameWithoutExtension(basePath);
+    string ext = Path.GetExtension(basePath);
+
+    for (int pi = 0; pi < parts; pi++)
+    {
+        int rowStart = pi * maxRowsPerImage;
+        int h = Math.Min(maxRowsPerImage, rows - rowStart);
+        string outPath = (parts == 1) ? basePath :
+            Path.Combine(dir ?? "", name + "_p" + (pi + 1).ToString("0000") + ext);
+
+        using (var bmp = new Bitmap(cols, h, PixelFormat.Format8bppIndexed))
+        {
+            // 0..255 のグレーパレット
+            var pal = bmp.Palette;
+            for (int i = 0; i < 256; i++) pal.Entries[i] = Color.FromArgb(i, i, i);
+            bmp.Palette = pal;
+
+            var rect = new Rectangle(0, 0, cols, h);
+            BitmapData bd = bmp.LockBits(rect, ImageLockMode.WriteOnly, bmp.PixelFormat);
+            try
+            {
+                byte* dstBase = (byte*)bd.Scan0;
+                int dstStride = bd.Stride; // 4バイト境界
+
+                byte* srcStripe = srcTop + (long)rowStart * srcStrideBytes;
+                for (int y = 0; y < h; y++)
+                {
+                    Buffer.MemoryCopy(
+                        srcStripe + (long)y * srcStrideBytes,
+                        dstBase   + (long)y * dstStride,
+                        dstStride,
+                        cols
+                    );
+                }
+            }
+            finally { bmp.UnlockBits(bd); }
+
+            // temp に書いて Move（GDI+汎用エラー回避策）
+            string tmp = outPath + ".tmp_" + Guid.NewGuid().ToString("N");
+            using (var fs = new FileStream(tmp, FileMode.CreateNew, FileAccess.Write, FileShare.None, 64 * 1024, FileOptions.WriteThrough))
+            {
+                bmp.Save(fs, ImageFormat.Png);
+                fs.Flush(true);
+            }
+            TryReplace(outPath, tmp);
+        }
+    }
+}
+
+// ===== 内部実装: 16bit→8bit 変換してストライプ保存 =====
+private static unsafe void Save16to8Stripes(byte* srcTop, int rows, int cols, int srcStrideBytes,
+                                            string basePath, int maxRowsPerImage, bool useMinMaxScale)
+{
+    int parts = (rows + maxRowsPerImage - 1) / maxRowsPerImage;
+    string dir = Path.GetDirectoryName(basePath);
+    string name = Path.GetFileNameWithoutExtension(basePath);
+    string ext = Path.GetExtension(basePath);
+
+    for (int pi = 0; pi < parts; pi++)
+    {
+        int rowStart = pi * maxRowsPerImage;
+        int h = Math.Min(maxRowsPerImage, rows - rowStart);
+        string outPath = (parts == 1) ? basePath :
+            Path.Combine(dir ?? "", name + "_p" + (pi + 1).ToString("0000") + ext);
+
+        using (var bmp = new Bitmap(cols, h, PixelFormat.Format8bppIndexed))
+        {
+            var pal = bmp.Palette;
+            for (int i = 0; i < 256; i++) pal.Entries[i] = Color.FromArgb(i, i, i);
+            bmp.Palette = pal;
+
+            var rect = new Rectangle(0, 0, cols, h);
+            BitmapData bd = bmp.LockBits(rect, ImageLockMode.WriteOnly, bmp.PixelFormat);
+            try
+            {
+                byte* dstBase = (byte*)bd.Scan0;
+                int dstStride = bd.Stride;
+
+                byte* srcStripe = srcTop + (long)rowStart * srcStrideBytes;
+
+                if (!useMinMaxScale)
+                {
+                    // 単純に上位8bit抽出（Little Endian想定）
+                    for (int y = 0; y < h; y++)
+                    {
+                        byte* s = srcStripe + (long)y * srcStrideBytes;
+                        byte* d = dstBase   + (long)y * dstStride;
+                        for (int x = 0; x < cols; x++)
+                        {
+                            d[x] = s[x * 2 + 1]; // HIバイト
+                        }
+                    }
+                }
+                else
+                {
+                    // min-max 正規化
+                    ushort minV = ushort.MaxValue, maxV = 0;
+                    for (int y = 0; y < h; y++)
+                    {
+                        byte* s = srcStripe + (long)y * srcStrideBytes;
+                        for (int x = 0; x < cols; x++)
+                        {
+                            ushort v = (ushort)(s[x * 2] | (s[x * 2 + 1] << 8));
+                            if (v < minV) minV = v;
+                            if (v > maxV) maxV = v;
+                        }
+                    }
+                    double scale = (maxV > minV) ? 255.0 / (maxV - minV) : 1.0;
+
+                    for (int y = 0; y < h; y++)
+                    {
+                        byte* s = srcStripe + (long)y * srcStrideBytes;
+                        byte* d = dstBase   + (long)y * dstStride;
+                        for (int x = 0; x < cols; x++)
+                        {
+                            ushort v = (ushort)(s[x * 2] | (s[x * 2 + 1] << 8));
+                            int u8 = (int)((v - minV) * scale + 0.5);
+                            if (u8 < 0) u8 = 0; else if (u8 > 255) u8 = 255;
+                            d[x] = (byte)u8;
+                        }
+                    }
+                }
+            }
+            finally { bmp.UnlockBits(bd); }
+
+            string tmp = outPath + ".tmp_" + Guid.NewGuid().ToString("N");
+            using (var fs = new FileStream(tmp, FileMode.CreateNew, FileAccess.Write, FileShare.None, 64 * 1024, FileOptions.WriteThrough))
+            {
+                bmp.Save(fs, ImageFormat.Png);
+                fs.Flush(true);
+            }
+            TryReplace(outPath, tmp);
+        }
+    }
+}
+
+private static void TryReplace(string dest, string tmp)
+{
+    try { if (File.Exists(dest)) File.Delete(dest); } catch { /* ignore */ }
+    File.Move(tmp, dest);
+}
+
+// ===== ここまで: PNG 保存API =====
+
+
 // LineStore_Warmup6.cs
 // 目的：PushBlock で受け取り、
 //  (A) ウォームアップ中は最大6行だけ保持（超えた分は毎回スクロールして 0..5 に最新6行を連続配置）
