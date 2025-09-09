@@ -1,4 +1,39 @@
 
+public unsafe bool SaveRangeToPngSingle(long startRow, int rows, int x0, int winW, string path,
+                                        out string error, bool normalize16To8 = true)
+{
+    error = null;
+    if (_disposed) { error = "disposed"; return false; }
+    if (winW <= 0 || winW > Width) { error = "invalid width"; return false; }
+    if (startRow < 0 || rows <= 0) { error = "invalid start/rows"; return false; }
+
+    long avail = StoredLines;              // ★ 保存可能な上限
+    // ★ ここで“保存可能範囲”に丸める（startRow が末尾超えないように）
+    if (startRow >= avail) { error = "startRow >= StoredLines"; return false; }
+    if (startRow + rows > avail) rows = (int)(avail - startRow);
+    if (rows <= 0) { error = "rows clamped to 0"; return false; }
+
+    IntPtr p; int stride;
+    if (!TryGetWindowPtr(startRow, winW, rows, x0, out p, out stride))
+    {
+        error = "TryGetWindowPtr failed"; return false;
+    }
+
+    string dir = Path.GetDirectoryName(path);
+    if (!string.IsNullOrEmpty(dir)) Directory.CreateDirectory(dir);
+
+    bool ok;
+    if (PixelType == PixelType.U8)
+        ok = Save8bppGraySingle((byte*)p, rows, winW, stride, path, out error);
+    else
+        ok = Save16to8Single((byte*)p, rows, winW, stride, path, out error, normalize16To8);
+
+    return ok;
+}
+
+
+
+
 // ===== 単一PNG保存API（分割なし） =====
 
 // 最新 rows 行を 1枚のPNGに保存（分割なし）
