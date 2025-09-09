@@ -1,3 +1,55 @@
+public sealed class BufferLease : IDisposable
+{
+    public PvBuffer Buffer { get; }
+    public bool FrameOK { get; }
+    private readonly Action<PvBuffer> _return;
+
+    internal BufferLease(PvBuffer buffer, bool ok, Action<PvBuffer> @return)
+    {
+        Buffer = buffer;
+        FrameOK = ok;
+        _return = @return;
+    }
+
+    public void Dispose() => _return?.Invoke(Buffer);
+}
+public class PipelineGrabber // 例
+{
+    private PvPipeline _pipe;
+
+    public bool TryAcquire(int timeoutMs, out BufferLease lease)
+    {
+        lease = null;
+        PvBuffer buf = null; PvResult op = null;
+        var r = _pipe.RetrieveNextBuffer(ref buf, ref op, (uint)timeoutMs);
+        if (!r.IsOK || buf == null) return false;
+
+        // 返却アクション：PipelineはReleaseBuffer
+        lease = new BufferLease(buf, op?.IsOK == true, b => _pipe.ReleaseBuffer(b));
+        return true;
+    }
+}
+public class StreamGrabber // 例
+{
+    private PvStream _stream;
+
+    public bool TryAcquire(int timeoutMs, out BufferLease lease)
+    {
+        lease = null;
+        PvBuffer buf = null; PvResult op = null;
+        var r = _stream.RetrieveBuffer(ref buf, ref op, (uint)timeoutMs);
+        if (!r.IsOK || buf == null) return false;
+
+        // 返却アクション：StreamはQueueBuffer（＝再キュー）
+        lease = new BufferLease(buf, op?.IsOK == true, b => _stream.QueueBuffer(b));
+        return true;
+    }
+}
+
+
+
+
+
 
 public unsafe bool SaveRangeToPngSingle(long startRow, int rows, int x0, int winW, string path,
                                         out string error, bool normalize16To8 = true)
