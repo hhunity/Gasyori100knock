@@ -1,3 +1,21 @@
+
+public sealed class BufferLease : IDisposable
+{
+    public PvBuffer Buffer { get; }
+    private readonly Action<PvBuffer> _return;
+    private int _disposed;
+
+    public BufferLease(PvBuffer buffer, Action<PvBuffer> @return)
+    { Buffer = buffer; _return = @return; }
+
+    public void Dispose()
+    {
+        if (Interlocked.Exchange(ref _disposed, 1) == 0)
+            _return?.Invoke(Buffer); // Pipeline: ReleaseBuffer / Stream: QueueBuffer
+    }
+}
+
+
 public interface IBufferReleaser { void Return(PvBuffer buffer); }
 
 public sealed class PipelineReleaser : IBufferReleaser
