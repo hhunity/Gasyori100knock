@@ -1,4 +1,178 @@
 
+// ===== 単一PNG保存API（分割なし） =====
+
+// 最新 rows 行を 1枚のPNGに保存（分割なし）
+public unsafe bool SaveLatestToPngSingle(int rows, int x0, int winW, string path,
+                                         out string error, bool normalize16To8 = true)
+{
+    error = null;
+    if (rows <= 0) { error = "rows <= 0"; return false; }
+    long avail = StoredLines;
+    if (avail < rows) { error = "not enough lines"; return false; }
+    long startRow = avail - rows;
+    return SaveRangeToPngSingle(startRow, rows, x0, winW, path, out error, normalize16To8);
+}
+
+// 任意範囲を 1枚のPNGに保存（分割なし）
+public unsafe bool SaveRangeToPngSingle(long startRow, int rows, int x0, int winW, string path,
+                                        out string error, bool normalize16To8 = true)
+{
+    error = null;
+    if (_disposed) { error = "disposed"; return false; }
+    if (startRow < 0 || rows <= 0) { error = "invalid start/rows"; return false; }
+    if (winW <= 0 || winW > Width) { error = "invalid width"; return false; }
+
+    long avail = StoredLines;
+    if (startRow + rows > avail) { error = "range exceeds stored lines"; return false; }
+
+    IntPtr p; int stride;
+    if (!TryGetWindowPtr(startRow, winW, rows, x0, out p, out stride))
+    {
+        error = "TryGetWindowPtr failed"; return false;
+    }
+
+    string? dir = Path.GetDirectoryName(path);
+    if (!string.IsNullOrEmpty(dir)) Directory.CreateDirectory(dir);
+
+    bool ok;
+    if (PixelType == PixelType.U8)
+        ok = Save8bppGraySingle((byte*)p, rows, winW, stride, path, out error);
+    else
+        ok = Save16to8Single((byte*)p, rows, winW, stride, path, out error, normalize16To8);
+
+    return ok;
+}
+
+// 8bitグレースケールを 1枚のPNGへ（分割なし）
+private static unsafe bool Save8bppGraySingle(byte* srcTop, int rows, int cols, int srcStrideBytes,
+                                              string path, out string? error)
+{
+    error = null;
+    try
+    {
+        using (var bmp = new Bitmap(cols, rows, PixelFormat.Format8bppIndexed))
+        {
+            // グレーパレット
+            var pal = bmp.Palette;
+            for (int i = 0; i < 256; i++) pal.Entries[i] = Color.FromArgb(i, i, i);
+            bmp.Palette = pal;
+
+            var rect = new Rectangle(0, 0, cols, rows);
+            BitmapData bd = bmp.LockBits(rect, ImageLockMode.WriteOnly, bmp.PixelFormat);
+            try
+            {
+                byte* dstBase = (byte*)bd.Scan0;
+                int dstStride = bd.Stride; // 4バイト境界
+                for (int y = 0; y < rows; y++)
+                {
+                    Buffer.MemoryCopy(
+                        srcTop + (long)y * srcStrideBytes,
+                        dstBase + (long)y * dstStride,
+                        dstStride,
+                        cols
+                    );
+                }
+            }
+            finally { bmp.UnlockBits(bd); }
+
+            // temp に書いてから置換（汎用エラー対策）
+            string tmp = path + ".tmp_" + Guid.NewGuid().ToString("N");
+            using (var fs = new FileStream(tmp, FileMode.CreateNew, FileAccess.Write, FileShare.None, 64 * 1024, FileOptions.WriteThrough))
+            {
+                bmp.Save(fs, ImageFormat.Png);
+                fs.Flush(true);
+            }
+            TryReplace(path, tmp);
+        }
+        return true;
+    }
+    catch (Exception ex) { error = ex.ToString(); return false; }
+}
+
+// 16bit → 8bitに変換して 1枚のPNGへ（分割なし）
+// normalize16To8=false: 上位8bit抽出 / true: min-max正規化
+private static unsafe bool Save16to8Single(byte* srcTop, int rows, int cols, int srcStrideBytes,
+                                           string path, out string? error, bool normalize16To8)
+{
+    error = null;
+    try
+    {
+        using (var bmp = new Bitmap(cols, rows, PixelFormat.Format8bppIndexed))
+        {
+            var pal = bmp.Palette;
+            for (int i = 0; i < 256; i++) pal.Entries[i] = Color.FromArgb(i, i, i);
+            bmp.Palette = pal;
+
+            var rect = new Rectangle(0, 0, cols, rows);
+            BitmapData bd = bmp.LockBits(rect, ImageLockMode.WriteOnly, bmp.PixelFormat);
+            try
+            {
+                byte* dstBase = (byte*)bd.Scan0;
+                int dstStride = bd.Stride;
+
+                if (!normalize16To8)
+                {
+                    // 上位8bit抽出（Little Endian）
+                    for (int y = 0; y < rows; y++)
+                    {
+                        byte* s = srcTop + (long)y * srcStrideBytes;
+                        byte* d = dstBase + (long)y * dstStride;
+                        for (int x = 0; x < cols; x++)
+                            d[x] = s[x * 2 + 1];
+                    }
+                }
+                else
+                {
+                    // min-max 正規化
+                    ushort minV = ushort.MaxValue, maxV = 0;
+                    for (int y = 0; y < rows; y++)
+                    {
+                        byte* s = srcTop + (long)y * srcStrideBytes;
+                        for (int x = 0; x < cols; x++)
+                        {
+                            ushort v = (ushort)(s[x * 2] | (s[x * 2 + 1] << 8));
+                            if (v < minV) minV = v;
+                            if (v > maxV) maxV = v;
+                        }
+                    }
+                    double scale = (maxV > minV) ? 255.0 / (maxV - minV) : 1.0;
+
+                    for (int y = 0; y < rows; y++)
+                    {
+                        byte* s = srcTop + (long)y * srcStrideBytes;
+                        byte* d = dstBase + (long)y * dstStride;
+                        for (int x = 0; x < cols; x++)
+                        {
+                            ushort v = (ushort)(s[x * 2] | (s[x * 2 + 1] << 8));
+                            int u8 = (int)((v - minV) * scale + 0.5);
+                            if (u8 < 0) u8 = 0; else if (u8 > 255) u8 = 255;
+                            d[x] = (byte)u8;
+                        }
+                    }
+                }
+            }
+            finally { bmp.UnlockBits(bd); }
+
+            string tmp = path + ".tmp_" + Guid.NewGuid().ToString("N");
+            using (var fs = new FileStream(tmp, FileMode.CreateNew, FileAccess.Write, FileShare.None, 64 * 1024, FileOptions.WriteThrough))
+            {
+                bmp.Save(fs, ImageFormat.Png);
+                fs.Flush(true);
+            }
+            TryReplace(path, tmp);
+        }
+        return true;
+    }
+    catch (Exception ex) { error = ex.ToString(); return false; }
+}
+
+private static void TryReplace(string dest, string tmp)
+{
+    try { if (File.Exists(dest)) File.Delete(dest); } catch { /* ファイルロック中などは上書き不可 */ }
+    File.Move(tmp, dest);
+}
+// ===== ここまで：単一PNG保存API =====
+
 // ===== ここから: PNG 保存API =====
 
 // 最新 rows 行を PNG 保存（必要なら複数ファイルに分割）
