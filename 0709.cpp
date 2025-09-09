@@ -1,3 +1,37 @@
+public interface IBufferReleaser { void Return(PvBuffer buffer); }
+
+public sealed class PipelineReleaser : IBufferReleaser
+{
+    private readonly PvPipeline _pipe;
+    public PipelineReleaser(PvPipeline pipe) => _pipe = pipe;
+    public void Return(PvBuffer b) => _pipe.ReleaseBuffer(b);
+}
+
+public sealed class StreamReleaser : IBufferReleaser
+{
+    private readonly PvStream _stream;
+    public StreamReleaser(PvStream stream) => _stream = stream;
+    public void Return(PvBuffer b) => _stream.QueueBuffer(b);
+}
+
+public sealed class BufferLease : IDisposable
+{
+    public PvBuffer Buffer { get; }
+    private readonly IBufferReleaser _owner;
+    private int _disposed;
+
+    public BufferLease(PvBuffer buffer, IBufferReleaser owner)
+    { Buffer = buffer; _owner = owner; }
+
+    public void Dispose()
+    {
+        if (Interlocked.Exchange(ref _disposed, 1) == 0)
+            _owner.Return(Buffer);
+    }
+}
+
+
+
 public sealed class BufferLease : IDisposable
 {
     public PvBuffer Buffer { get; }
