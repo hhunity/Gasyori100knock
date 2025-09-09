@@ -1,4 +1,26 @@
 
+public class ToggleButton : Button
+{
+    private bool isOn = false;
+    public bool IsOn 
+    {
+        get => isOn;
+        set { isOn = value; UpdateState(); }
+    }
+
+    public ToggleButton()
+    {
+        this.Click += (s, e) => { IsOn = !IsOn; };
+        UpdateState();
+    }
+
+    private void UpdateState()
+    {
+        this.Text = IsOn ? "ON" : "OFF";
+        this.BackColor = IsOn ? Color.LightGreen : Color.LightGray;
+    }
+}
+
 CheckBox toggleButton = new CheckBox();
 toggleButton.Appearance = Appearance.Button;   // ボタン風に表示
 toggleButton.Text = "OFF";
