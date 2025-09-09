@@ -1,4 +1,15 @@
 
+CheckBox toggleButton = new CheckBox();
+toggleButton.Appearance = Appearance.Button;   // ボタン風に表示
+toggleButton.Text = "OFF";
+toggleButton.AutoSize = true;
+
+toggleButton.CheckedChanged += (s, e) =>
+{
+    toggleButton.Text = toggleButton.Checked ? "ON" : "OFF";
+};
+this.Controls.Add(toggleButton);
+
 {
   "title": "App Settings",
   "groups": [
