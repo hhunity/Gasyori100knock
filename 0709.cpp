@@ -1,3 +1,76 @@
+
+// ===== PNG保存：範囲指定（full幅or任意幅） =====
+        // 使い方例：SaveRangeToPng(0, (int)HeadLines, 0, Width, "all.png")
+        public bool SaveRangeToPng(long startRow, int rows, int x0, int winW, string path,
+                                   bool normalize16To8 = true)
+        {
+            if (_disposed) throw new ObjectDisposedException(nameof(LineStore));
+            if (string.IsNullOrWhiteSpace(path)) throw new ArgumentNullException(nameof(path));
+            if (startRow < 0 || rows <= 0 || winW <= 0 || winW > Width) return false;
+
+            long h = Interlocked.Read(ref _head);
+            if (h < startRow + rows) return false; // データ不足
+
+            int  x0c = Clamp(x0, 0, Math.Max(0, Width - winW));
+            byte* srcTop = (byte*)_buf + startRow * RowBytes + (long)x0c * ElemSizeBytes;
+
+            switch (PixelType)
+            {
+                case PixelType.U8:
+                    return Save8bppGrayscale(srcTop, rows, winW, RowBytes, path);
+
+                case PixelType.U16:
+                    if (normalize16To8)
+                        return Save16to8(srcTop, rows, winW, RowBytes, path);
+                    else
+                        throw new NotSupportedException("16bitそのままPNG保存は標準APIでは扱いにくいです（ImageSharp等をご利用ください）。");
+
+                default:
+                    throw new NotSupportedException("Unknown pixel type");
+            }
+        }
+
+        // 最新 rows 行をPNG保存（幅は winW、左端 x0）
+        public bool SaveLatestToPng(int rows, int x0, int winW, string path,
+                                    bool normalize16To8 = true)
+        {
+            if (rows <= 0) return false;
+            long h = Interlocked.Read(ref _head);
+            if (h < rows) return false;
+            long startRow = h - rows;
+            return SaveRangeToPng(startRow, rows, x0, winW, path, normalize16To8);
+        }
+
+        // ===== 内部: 8bit グレースケール PNG =====
+        private static bool Save8bppGrayscale(byte* srcTop, int rows, int cols, int srcStrideBytes, string path)
+        {
+            using var bmp = new Bitmap(cols, rows, PixelFormat.Format8bppIndexed);
+            // グレーパレット設定
+            ColorPalette pal = bmp.Palette;
+            for (int i = 0; i < 256; i++) pal.Entries[i] = Color.FromArgb(i, i, i);
+            bmp.Palette = pal;
+
+            var rect = new Rectangle(0, 0, cols, rows);
+            BitmapData bd = bmp.LockBits(rect, ImageLockMode.WriteOnly, bmp.PixelFormat);
+            try
+            {
+                byte* dstRow = (byte*)bd.Scan0;
+                int   dstStride = bd.Stride;
+                for (int y = 0; y < rows; y++)
+                {
+                    Buffer.MemoryCopy(srcTop + (long)y * srcStrideBytes,
+                                      dstRow + (long)y * dstStride,
+                                      dstStride, cols);
+                }
+            }
+            finally { bmp.UnlockBits(bd); }
+
+            bmp.Save(path, System.Drawing.Imaging.ImageFormat.Png);
+            return true;
+        }
+
+        // ===== 内部: 16bit → 8b
+
 public bool TryGetWindowPtr(long startRow, int winW, int winH, int x0,
                             out IntPtr ptr, out int strideBytes)
 {
