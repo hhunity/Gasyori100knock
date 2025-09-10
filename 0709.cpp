@@ -1,3 +1,15 @@
+PushWarmupさしかえ。
+headtotalは間違えやすいので削除
+バッファ数と角度検知のバッファは別で良い。確認する。
+
+エラー発生時に、ログを出せるように。
+gou消して再起動不要に。バッファタブ追加。
+ログフォルダは固定で良いかも。
+
+creextのエラーは、コールバックできちんと返すように。
+上のメモリ解放確認と、再利用フラグ
+パイプライン確認。上から、回転支持あれば、
+
 private void PushWarmup(IntPtr src, int rows, int strideBytes)
 {
     byte* sBase = (byte*)src;
