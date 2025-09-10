@@ -1,3 +1,34 @@
+
+#include <windows.h>
+#include <string>
+#include <sstream>
+
+inline void DebugLog(const char* file, int line, const char* func, const char* msg)
+{
+    std::ostringstream oss;
+    oss << file << "(" << line << ") [" << func << "] " << msg << "\n";
+    OutputDebugStringA(oss.str().c_str());
+}
+
+#define DBGLOG(msg) DebugLog(__FILE__, __LINE__, __FUNCTION__, msg)
+
+try {
+    throw std::runtime_error("bad things happened");
+}
+catch (const std::exception& ex) {
+    DBGLOG(ex.what());
+    return -1;
+}
+catch (...) {
+    DBGLOG("Unknown exception");
+    return -999;
+}
+
+Microsoft Sysinternals 
+
+
+
+
 PushWarmupさしかえ。
 headtotalは間違えやすいので削除
 バッファ数と角度検知のバッファは別で良い。確認する。
