@@ -1,3 +1,90 @@
+private void PushWarmup(IntPtr src, int rows, int strideBytes)
+{
+    byte* sBase = (byte*)src;
+    byte* dBase = (byte*)_buf; // 先頭から 6 行分のみ使用
+    int filled = _warmupCount; // 0..6
+
+    // 1) まだ満杯でない場合：まず空きを埋める
+    if (filled < WARMUP_MAX)
+    {
+        int need = WARMUP_MAX - filled;
+        int take = (rows < need) ? rows : need;
+
+        if (strideBytes == RowBytes)
+        {
+            long bytes = (long)take * RowBytes;
+            Buffer.MemoryCopy(sBase, dBase + (long)filled * RowBytes, bytes, bytes);
+        }
+        else
+        {
+            for (int i = 0; i < take; i++)
+            {
+                byte* srcLine = sBase + (long)i * strideBytes;
+                byte* dstLine = dBase + (long)(filled + i) * RowBytes;
+                Buffer.MemoryCopy(srcLine, dstLine, RowBytes, RowBytes);
+            }
+        }
+
+        filled += take;
+        _warmupCount = filled;
+        _storedLines = filled; // ここまでは 1..6
+
+        rows -= take;
+        sBase += (long)take * strideBytes;
+
+        if (rows <= 0) return; // まだ満杯になってない or ちょうど埋まった
+    }
+
+    // 2) ここから filled==6（満杯）：最新6行に更新する
+    //    ケース分け：ブロック末尾だけで決まるか（rows>=6）、部分シフトが必要か（rows<6）
+
+    if (rows >= WARMUP_MAX)
+    {
+        // ブロックの「末尾6行」だけを 0..5 に配置（最大6行コピー）
+        byte* tail = sBase + (long)(rows - WARMUP_MAX) * strideBytes;
+
+        if (strideBytes == RowBytes)
+        {
+            long bytes = (long)WARMUP_MAX * RowBytes;
+            Buffer.MemoryCopy(tail, dBase, bytes, bytes);
+        }
+        else
+        {
+            for (int i = 0; i < WARMUP_MAX; i++)
+            {
+                Buffer.MemoryCopy(
+                    tail + (long)i * strideBytes,
+                    dBase + (long)i * RowBytes,
+                    RowBytes, RowBytes);
+            }
+        }
+        // _warmupCount(=6), _storedLines(=6) は変わらず
+    }
+    else // 0 < rows < 6
+    {
+        int shift = rows;                   // 左に詰める行数
+        int keep  = WARMUP_MAX - shift;     // 残して前に詰める本数
+
+        // 2-a) 既存 6 行を前詰め（オーバーラップあり → 行ごとコピー）
+        for (int y = 0; y < keep; y++)
+        {
+            byte* srcRow = dBase + (long)(y + shift) * RowBytes;
+            byte* dstRow = dBase + (long)y * RowBytes;
+            Buffer.MemoryCopy(srcRow, dstRow, RowBytes, RowBytes);
+        }
+
+        // 2-b) 新規 rows 行を末尾に配置
+        for (int i = 0; i < rows; i++)
+        {
+            byte* srcLine = sBase + (long)i * strideBytes;
+            byte* dstLine = dBase + (long)(keep + i) * RowBytes;
+            Buffer.MemoryCopy(srcLine, dstLine, RowBytes, RowBytes);
+        }
+        // 常に _warmupCount=6, _storedLines=6 を維持
+    }
+}
+
+
 
 public sealed class BufferLease : IDisposable
 {
