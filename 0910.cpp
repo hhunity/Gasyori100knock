@@ -1,4 +1,13 @@
 
+cv::parallel_for_(cv::Range(0, src.rows), [&](const cv::Range& range){
+    for (int y = range.start; y < range.end; y++) {
+        const uchar* pSrc = src.ptr<uchar>(y);
+        uchar* pDst = dst.ptr<uchar>(y);
+        for (int x = 0; x < src.cols; x++)
+            pDst[x] = (pSrc[x] > thresh ? maxval : 0);
+    }
+});
+
 
 検知の覚える方式戻す。
 縦幅制限やっぱり必要？
