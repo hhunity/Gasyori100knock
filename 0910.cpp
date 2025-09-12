@@ -1,4 +1,26 @@
 
+スループット、レイテンシーの数字出せるように
+テキストエディタ選択
+⭐️テストまわす
+⭐️バッファリングが、溜まった時と、たまらなかった時で
+きちんと画像見れているか確認
+⭐️同一画像比較の場合にメモリーどーなってるか確認
+⭐️100でエラーになった理由
+
+
+⭐️detectの確認
+-フィルター周り確認。
+-ctx周りで競合しないか確認。
+⭐️corretの確認
+-2値化変更できるように。
+-inとoutを別メモリに
+
+
+
+
+
+
+
 cv::parallel_for_(cv::Range(0, src.rows), [&](const cv::Range& range){
     for (int y = range.start; y < range.end; y++) {
         const uchar* pSrc = src.ptr<uchar>(y);
@@ -9,14 +31,6 @@ cv::parallel_for_(cv::Range(0, src.rows), [&](const cv::Range& range){
 });
 
 
-検知の覚える方式戻す。
-縦幅制限やっぱり必要？
-進捗バーおそい
-メモリリーク確認
-スループット、レイテンシーの数字出せるように
-テキストエディタ選択
-描画更新改良
-テストまわす
 
 using System;
 using System.Runtime.InteropServices;
