@@ -71,9 +71,9 @@ namespace YourApp.Imaging
             PixelType     = pt;
             ElemSizeBytes = (pt == PixelType.U8) ? 1 : 2;
 
-// ctor の末尾付近に追加
-_warmupTimes = new double[WarmupMax];
-for (int i = 0; i < WarmupMax; i++) _warmupTimes[i] = double.NaN;
+        // ctor の末尾付近に追加
+        _warmupTimes = new double[WarmupMax];
+        for (int i = 0; i < WarmupMax; i++) _warmupTimes[i] = double.NaN;
 
             checked
             {
@@ -163,12 +163,16 @@ for (int i = 0; i < WarmupMax; i++) _warmupTimes[i] = double.NaN;
                 int need = WarmupMax - filled;
                 int take = rows < need ? rows : need;
 
+                // 1) 満杯まで埋める  の if (filled < WarmupMax) ブロック内、コピーの直後に追加              }
+
                 // ROIコピー（1行ずつ。roiX>0 なら必ず行ループ）
                 for (int i = 0; i < take; i++)
                 {
                     byte* srcLine = sBase + (long)i * srcStrideBytes + roiByteOffset;
                     byte* dstLine = dBase + (long)(filled + i) * RowBytes;
                     Buffer.MemoryCopy(srcLine, dstLine, RowBytes, RowBytes);
+
+                    _warmupTimes[filled + i] = timeSec;   // ← 行ごとに同じ取得時刻を付与
                 }
 
                 filled += take;
@@ -188,6 +192,12 @@ for (int i = 0; i < WarmupMax; i++) _warmupTimes[i] = double.NaN;
             // 2) 満杯（WarmupMax 行）状態の更新
             if (rows >= WarmupMax)
             {
+                // 2) 満杯・置換の分岐内のコピーの直後に追加
+                for (int i = 0; i < WarmupMax; i++)
+                {
+                    _warmupTimes[i] = timeSec;            // ← 全部このブロックの時刻
+                }
+
                 // ブロック末尾 WarmupMax 行で置換
                 byte* tail = sBase + (long)(rows - WarmupMax) * srcStrideBytes;
                 for (int i = 0; i < WarmupMax; i++)
@@ -209,14 +219,19 @@ for (int i = 0; i < WarmupMax; i++) _warmupTimes[i] = double.NaN;
                     byte* srcRow = dBase + (long)(y + shift) * RowBytes;
                     byte* dstRow = dBase + (long)y * RowBytes;
                     Buffer.MemoryCopy(srcRow, dstRow, RowBytes, RowBytes);
-                }
 
+                    _warmupTimes[y] = _warmupTimes[y + shift];
+                }
+  
                 // 末尾に rows 行の ROI を配置
                 for (int i = 0; i < rows; i++)
                 {
                     byte* srcLine = sBase + (long)i * srcStrideBytes + roiByteOffset;
                     byte* dstLine = dBase + (long)(keep + i) * RowBytes;
                     Buffer.MemoryCopy(srcLine, dstLine, RowBytes, RowBytes);
+
+                    // 既存の画素コピーの直後でOK
+                     _warmupTimes[keep + i] = timeSec;
                 }
 
                 Volatile.Write(ref _storedLines, WarmupMax);
@@ -282,18 +297,40 @@ for (int i = 0; i < WarmupMax; i++) _warmupTimes[i] = double.NaN;
             Volatile.Write(ref _segCount, n + 1);
         }
 
-        // ---- 行 index の時刻をセグメントで線形補間（なければ外挿/定数）----
-        private double RowTimeSec(long row)
+                // ---- 行 index の時刻をセグメントで線形補間（なければ外挿/定数）----
+        private double RowTimeSec(long rowAbs)
         {
+            // ★ Commit 前は全部ウォームアップ扱い
+            if (!Volatile.Read(ref _committed))
+            {
+                int idx = (int)rowAbs;
+                // 範囲チェック（呼び出し側が StoredLines を見ている前提で通常OK）
+                if (idx >= 0 && idx < _warmupCount && !double.IsNaN(_warmupTimes[idx]))
+                    return _warmupTimes[idx];
+        
+                // フォールバック（通常来ない）
+                return double.IsNaN(_warmupLastTimeSec) ? DateTimeToUnixSec(DateTime.UtcNow) : _warmupLastTimeSec;
+            }
+        
+            // ★ Commit 後でも、ウォームアップ領域(0.._commitBase-1)は per-line 時刻をそのまま返す
+            if (rowAbs < _commitBase)
+            {
+                int idx = (int)rowAbs;
+                if (idx >= 0 && idx < WarmupMax && !double.IsNaN(_warmupTimes[idx]))
+                    return _warmupTimes[idx];
+        
+                // ありえない場合の保険
+                return _warmupLastTimeSec;
+            }
+        
+            // ここからは従来どおり：論理行に変換してセグメント補間
             int n = Volatile.Read(ref _segCount);
             if (n == 0)
-            {
-                return double.IsNaN(_warmupLastTimeSec) ? DateTimeToUnixSec(DateTime.UtcNow)
-                                                        : _warmupLastTimeSec;
-            }
-
+                return double.IsNaN(_warmupLastTimeSec) ? DateTimeToUnixSec(DateTime.UtcNow) : _warmupLastTimeSec;
+        
+            long row = rowAbs - _commitBase;    // 絶対→論理
             var arr = _segs;
-
+        
             int lo = 0, hi = n - 1, k = -1;
             while (lo <= hi)
             {
@@ -302,7 +339,7 @@ for (int i = 0; i < WarmupMax; i++) _warmupTimes[i] = double.NaN;
                 if (s <= row) { k = mid; lo = mid + 1; }
                 else          { hi = mid - 1; }
             }
-
+        
             if (k < 0) return arr[0].T;
             if (k == n - 1)
             {
@@ -311,12 +348,12 @@ for (int i = 0; i < WarmupMax; i++) _warmupTimes[i] = double.NaN;
                     var p1 = arr[n - 2]; var p2 = arr[n - 1];
                     long   dx = p2.Start - p1.Start;
                     double dt = p2.T     - p1.T;
-                    double a  = (dx > 0) ? dt / dx : 0.0; // 秒/行
-                    return p2.T + (row - p2.Start) * a;
+                    double a  = (dx > 0) ? dt / dx : 0.0;
+                    return p2.T + (row - p2.Start) * a;  // 勾配外挿
                 }
                 return arr[n - 1].T;
             }
-
+        
             var prev = arr[k];
             var next = arr[k + 1];
             long drow = next.Start - prev.Start;
