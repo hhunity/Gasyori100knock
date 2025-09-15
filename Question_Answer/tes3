@@ -1,0 +1,44 @@
+
+using System;
+using System.IO;
+using BitMiracle.LibTiff.Classic;
+
+class Program
+{
+    static void Main()
+    {
+        string filePath = "test_gray.tif";
+
+        using (Tiff image = Tiff.Open(filePath, "r"))
+        {
+            if (image == null)
+            {
+                Console.WriteLine("Failed to open TIFF file.");
+                return;
+            }
+
+            int width = image.GetField(TiffTag.IMAGEWIDTH)[0].ToInt();
+            int height = image.GetField(TiffTag.IMAGELENGTH)[0].ToInt();
+            int bitsPerSample = image.GetField(TiffTag.BITSPERSAMPLE)[0].ToInt();
+            int samplesPerPixel = image.GetField(TiffTag.SAMPLESPERPIXEL)[0].ToInt();
+
+            if (bitsPerSample != 8 || samplesPerPixel != 1)
+            {
+                Console.WriteLine("Only 8-bit grayscale images are supported.");
+                return;
+            }
+
+            byte[] raster = new byte[width * height];
+            byte[] buffer = new byte[image.ScanlineSize()];
+
+            for (int row = 0; row < height; row++)
+            {
+                image.ReadScanline(buffer, row);
+                Buffer.BlockCopy(buffer, 0, raster, row * width, width);
+            }
+
+            Console.WriteLine($"Image loaded: {width}x{height}");
+            Console.WriteLine($"Pixel at (100,100) = {raster[100 * width + 100]}");
+        }
+    }
+}

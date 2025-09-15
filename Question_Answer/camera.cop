@@ -1,0 +1,240 @@
+#pragma once
+#include <stdint.h>
+
+extern "C" {
+
+    // カメラ初期化 + pvcfg設定ファイル読み込み
+    __declspec(dllexport) bool __stdcall InitCamera(const char* configFilePath);
+
+    // バックグラウンド受信開始（1回のみ）
+    __declspec(dllexport) int __stdcall GrabImage();
+
+    // 新着画像のバッファポインタを返す
+    __declspec(dllexport) void* __stdcall GetImagePointer(int bufferId);
+
+    // 画像サイズ（バイト数）を取得
+    __declspec(dllexport) int __stdcall GetImageSize(int bufferId);
+
+    // 画像バッファを解放
+    __declspec(dllexport) void __stdcall ReleaseImage(int bufferId);
+
+    // 受信スレッドの停止
+    __declspec(dllexport) void __stdcall StopReceiving();
+
+    // 画像到着通知のコールバック登録
+    __declspec(dllexport) void __stdcall SetImageArrivedCallback(void (__stdcall *callback)(int));
+
+    // カメラとリソース解放
+    __declspec(dllexport) void __stdcall ReleaseCamera();
+}
+
+#include "CameraGrabber.h"
+
+#include <PvSystem.h>
+#include <PvDevice.h>
+#include <PvStream.h>
+#include <PvPipeline.h>
+#include <PvBuffer.h>
+#include <PvConfigurationReader.h>
+
+#include <thread>
+#include <mutex>
+#include <map>
+#include <atomic>
+#include <cstring>
+
+static PvDevice* lDevice = nullptr;
+static PvStream* lStream = nullptr;
+static PvPipeline* lPipeline = nullptr;
+
+static std::map<int, PvBuffer*> g_bufferMap;
+static std::mutex g_mutex;
+static int g_nextBufferId = 1;
+
+static std::atomic<bool> g_running(false);
+static void (__stdcall *g_callback)(int) = nullptr;
+
+// ===== カメラ初期化と設定読み込み =====
+bool __stdcall InitCamera(const char* configFilePath)
+{
+    PvSystem system;
+    system.Find();
+
+    PvInterface* iface = system.GetInterface(0);
+    if (!iface) return false;
+
+    PvDeviceInfo* deviceInfo = iface->GetDeviceInfo(0);
+    if (!deviceInfo) return false;
+
+    lDevice = PvDevice::CreateAndConnect(deviceInfo->GetConnectionID());
+    if (!lDevice) return false;
+
+    lStream = PvStream::CreateAndOpen(deviceInfo->GetConnectionID());
+    if (!lStream) return false;
+
+    lDevice->SetStreamDestination(lStream->GetLocalIPAddress(), lStream->GetLocalPort());
+
+    lPipeline = new PvPipeline(lStream);
+    lPipeline->Start();
+
+    // pvcfg構成ファイルを読み込んで設定
+    PvConfigurationReader reader;
+    PvResult result = reader.Load(configFilePath);
+    if (!result.IsOK()) return false;
+
+    result = reader.Configure(lDevice);
+    return result.IsOK();
+}
+
+// ===== 非同期受信スレッド =====
+void ProcessWorker()
+{
+    while (g_running)
+    {
+        PvBuffer* buf = nullptr;
+        PvResult result;
+
+        if (lPipeline->RetrieveNextBuffer(&buf, 1000, &result))
+        {
+            std::lock_guard<std::mutex> lock(g_mutex);
+            int id = g_nextBufferId++;
+            g_bufferMap[id] = buf;
+
+            if (g_callback) g_callback(id);
+        }
+
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
+}
+
+int __stdcall GrabImage()
+{
+    if (!g_running)
+    {
+        g_running = true;
+        std::thread(ProcessWorker).detach();
+    }
+    return 1;
+}
+
+void __stdcall StopReceiving()
+{
+    g_running = false;
+}
+
+// ===== ポインタ/サイズ取得 =====
+void* __stdcall GetImagePointer(int bufferId)
+{
+    std::lock_guard<std::mutex> lock(g_mutex);
+    if (g_bufferMap.count(bufferId) == 0) return nullptr;
+    return g_bufferMap[bufferId]->GetImage()->GetDataPointer();
+}
+
+int __stdcall GetImageSize(int bufferId)
+{
+    std::lock_guard<std::mutex> lock(g_mutex);
+    if (g_bufferMap.count(bufferId) == 0) return 0;
+    return g_bufferMap[bufferId]->GetImage()->GetImageSize();
+}
+
+// ===== バッファ解放 =====
+void __stdcall ReleaseImage(int bufferId)
+{
+    std::lock_guard<std::mutex> lock(g_mutex);
+    if (g_bufferMap.count(bufferId) == 0) return;
+
+    lPipeline->ReleaseBuffer(g_bufferMap[bufferId]);
+    g_bufferMap.erase(bufferId);
+}
+
+// ===== コールバック登録 =====
+void __stdcall SetImageArrivedCallback(void (__stdcall *callback)(int))
+{
+    g_callback = callback;
+}
+
+// ===== カメラとリソース解放 =====
+void __stdcall ReleaseCamera()
+{
+    StopReceiving();
+
+    if (lPipeline)
+    {
+        lPipeline->Stop();
+        delete lPipeline;
+        lPipeline = nullptr;
+    }
+
+    if (lStream)
+    {
+        PvStream::Free(lStream);
+        lStream = nullptr;
+    }
+
+    if (lDevice)
+    {
+        PvDevice::Free(lDevice);
+        lDevice = nullptr;
+    }
+}
+
+
+
+[DllImport("CameraGrabber.dll", CharSet = CharSet.Ansi)]
+static extern bool InitCamera(string configPath);
+
+[DllImport("CameraGrabber.dll")]
+static extern int GrabImage();
+
+[DllImport("CameraGrabber.dll")]
+static extern IntPtr GetImagePointer(int bufferId);
+
+[DllImport("CameraGrabber.dll")]
+static extern int GetImageSize(int bufferId);
+
+[DllImport("CameraGrabber.dll")]
+static extern void ReleaseImage(int bufferId);
+
+[UnmanagedFunctionPointer(CallingConvention.StdCall)]
+delegate void ImageCallback(int bufferId);
+
+[DllImport("CameraGrabber.dll")]
+static extern void SetImageArrivedCallback(ImageCallback callback);
+
+void OnImageArrived(int id)
+{
+    this.Invoke(() =>
+    {
+        int size = GetImageSize(id);
+        IntPtr ptr = GetImagePointer(id);
+        if (size > 0 && ptr != IntPtr.Zero)
+        {
+            byte[] imageBuf = new byte[size];
+            Marshal.Copy(ptr, imageBuf, 0, size);
+
+            Bitmap bmp = new Bitmap(width, height, PixelFormat.Format8bppIndexed);
+            var pal = bmp.Palette;
+            for (int i = 0; i < 256; i++) pal.Entries[i] = Color.FromArgb(i, i, i);
+            bmp.Palette = pal;
+
+            BitmapData data = bmp.LockBits(
+                new Rectangle(0, 0, width, height),
+                ImageLockMode.WriteOnly,
+                PixelFormat.Format8bppIndexed);
+
+            Marshal.Copy(imageBuf, 0, data.Scan0, imageBuf.Length);
+            bmp.UnlockBits(data);
+
+            pictureBox1.Image = bmp;
+        }
+
+        ReleaseImage(id);
+    });
+}
+
+
+
+
+
+
+
