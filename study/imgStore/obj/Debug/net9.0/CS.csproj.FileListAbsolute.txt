@@ -1,0 +1,15 @@
+/Users/hiroyukih/vscode/Gasyori100knock/study/CS/obj/Debug/net9.0/CS.GeneratedMSBuildEditorConfig.editorconfig
+/Users/hiroyukih/vscode/Gasyori100knock/study/CS/obj/Debug/net9.0/CS.AssemblyInfoInputs.cache
+/Users/hiroyukih/vscode/Gasyori100knock/study/CS/obj/Debug/net9.0/CS.AssemblyInfo.cs
+/Users/hiroyukih/vscode/Gasyori100knock/study/CS/obj/Debug/net9.0/CS.csproj.CoreCompileInputs.cache
+/Users/hiroyukih/vscode/Gasyori100knock/study/CS/obj/Debug/net9.0/CS.sourcelink.json
+/Users/hiroyukih/vscode/Gasyori100knock/study/CS/bin/Debug/net9.0/CS
+/Users/hiroyukih/vscode/Gasyori100knock/study/CS/bin/Debug/net9.0/CS.deps.json
+/Users/hiroyukih/vscode/Gasyori100knock/study/CS/bin/Debug/net9.0/CS.runtimeconfig.json
+/Users/hiroyukih/vscode/Gasyori100knock/study/CS/bin/Debug/net9.0/CS.dll
+/Users/hiroyukih/vscode/Gasyori100knock/study/CS/bin/Debug/net9.0/CS.pdb
+/Users/hiroyukih/vscode/Gasyori100knock/study/CS/obj/Debug/net9.0/CS.dll
+/Users/hiroyukih/vscode/Gasyori100knock/study/CS/obj/Debug/net9.0/refint/CS.dll
+/Users/hiroyukih/vscode/Gasyori100knock/study/CS/obj/Debug/net9.0/CS.pdb
+/Users/hiroyukih/vscode/Gasyori100knock/study/CS/obj/Debug/net9.0/CS.genruntimeconfig.cache
+/Users/hiroyukih/vscode/Gasyori100knock/study/CS/obj/Debug/net9.0/ref/CS.dll

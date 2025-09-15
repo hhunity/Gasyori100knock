@@ -1,0 +1,15 @@
+/Users/hiroyukih/vscode/Gasyori100knock/study/imgStore/bin/Debug/net9.0/imgSotre
+/Users/hiroyukih/vscode/Gasyori100knock/study/imgStore/bin/Debug/net9.0/imgSotre.deps.json
+/Users/hiroyukih/vscode/Gasyori100knock/study/imgStore/bin/Debug/net9.0/imgSotre.runtimeconfig.json
+/Users/hiroyukih/vscode/Gasyori100knock/study/imgStore/bin/Debug/net9.0/imgSotre.dll
+/Users/hiroyukih/vscode/Gasyori100knock/study/imgStore/bin/Debug/net9.0/imgSotre.pdb
+/Users/hiroyukih/vscode/Gasyori100knock/study/imgStore/obj/Debug/net9.0/imgSotre.GeneratedMSBuildEditorConfig.editorconfig
+/Users/hiroyukih/vscode/Gasyori100knock/study/imgStore/obj/Debug/net9.0/imgSotre.AssemblyInfoInputs.cache
+/Users/hiroyukih/vscode/Gasyori100knock/study/imgStore/obj/Debug/net9.0/imgSotre.AssemblyInfo.cs
+/Users/hiroyukih/vscode/Gasyori100knock/study/imgStore/obj/Debug/net9.0/imgSotre.csproj.CoreCompileInputs.cache
+/Users/hiroyukih/vscode/Gasyori100knock/study/imgStore/obj/Debug/net9.0/imgSotre.sourcelink.json
+/Users/hiroyukih/vscode/Gasyori100knock/study/imgStore/obj/Debug/net9.0/imgSotre.dll
+/Users/hiroyukih/vscode/Gasyori100knock/study/imgStore/obj/Debug/net9.0/refint/imgSotre.dll
+/Users/hiroyukih/vscode/Gasyori100knock/study/imgStore/obj/Debug/net9.0/imgSotre.pdb
+/Users/hiroyukih/vscode/Gasyori100knock/study/imgStore/obj/Debug/net9.0/imgSotre.genruntimeconfig.cache
+/Users/hiroyukih/vscode/Gasyori100knock/study/imgStore/obj/Debug/net9.0/ref/imgSotre.dll
