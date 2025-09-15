@@ -43,6 +43,8 @@ namespace YourApp.Imaging
         private TimeSeg[] _segs = new TimeSeg[64];
         private int _segCount = 0;                   // Volatile.Write で公開
         private double _warmupLastTimeSec = double.NaN;
+        // ★ 追加：ウォームアップ領域(0..WarmupMax-1)の各行のUTC秒
+        private double[] _warmupTimes;
 
         // ---- ctor / dtor ----
         /// <param name="srcWidth">受信元の横幅（例 2048）</param>
@@ -68,6 +70,10 @@ namespace YourApp.Imaging
 
             PixelType     = pt;
             ElemSizeBytes = (pt == PixelType.U8) ? 1 : 2;
+
+// ctor の末尾付近に追加
+_warmupTimes = new double[WarmupMax];
+for (int i = 0; i < WarmupMax; i++) _warmupTimes[i] = double.NaN;
 
             checked
             {
