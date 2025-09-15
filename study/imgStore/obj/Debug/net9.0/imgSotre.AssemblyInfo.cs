@@ -13,7 +13,7 @@ using System.Reflection;
 [assembly: System.Reflection.AssemblyCompanyAttribute("imgSotre")]
 [assembly: System.Reflection.AssemblyConfigurationAttribute("Debug")]
 [assembly: System.Reflection.AssemblyFileVersionAttribute("1.0.0.0")]
-[assembly: System.Reflection.AssemblyInformationalVersionAttribute("1.0.0+bb2a8a43cf42102cf533d4e436d2b047bed82bfb")]
+[assembly: System.Reflection.AssemblyInformationalVersionAttribute("1.0.0+d63cbbe993836fea82f5c506a8020973704bdebc")]
 [assembly: System.Reflection.AssemblyProductAttribute("imgSotre")]
 [assembly: System.Reflection.AssemblyTitleAttribute("imgSotre")]
 [assembly: System.Reflection.AssemblyVersionAttribute("1.0.0.0")]

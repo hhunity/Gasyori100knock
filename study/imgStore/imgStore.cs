@@ -31,13 +31,13 @@ namespace YourApp.Imaging
         public int  SourceRowBytes => SourceWidth * ElemSizeBytes;
 
         // 状態
-        private volatile bool _committed;
+        private bool _committed;
         private int _warmupCount;          // 0..WarmupMax
         private IntPtr _buf;               // [CapacityLines x RowBytes]
         private long _writeIndex;          // Commit後に増える（WarmupMax から）
         private long _headTotal;           // 統計
         private long _storedLines;         // 0..WarmupMax → WarmupMax..CapacityLines
-        private volatile bool _disposed;
+        private bool _disposed;
 
         // 時刻（ウォームアップ per-line）
         private double[] _warmupTimes;     // 長さ WarmupMax

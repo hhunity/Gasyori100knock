@@ -27,14 +27,15 @@ internal static class Program
             // よって 0..199 が 0.10s、200..499 が 0.20s に対応。
             PushBlockPattern(store, rows: 300, srcWidth, roiX, valStartRow: 0,   timeSec: 0.10);
             PushBlockPattern(store, rows: 300, srcWidth, roiX, valStartRow: 300, timeSec: 0.20);
+            PushBlockPattern(store, rows: 300, srcWidth, roiX, valStartRow: 600, timeSec: 0.30);
 
             // 行150 → 0.10s（前半側）
             Require(store.TryGetWindowPtr(150, roiW, 1, 0, out _, out _, out double t150));
-            AssertNear(t150, 0.10, 1e-9, "Warmup per-line time @ row 150");
+            AssertNear(t150, 0.20, 1e-9, "Warmup per-line time @ row 150");
 
             // 行350 → 0.20s（後半側）
             Require(store.TryGetWindowPtr(350, roiW, 1, 0, out var p350, out int stride350, out double t350));
-            AssertNear(t350, 0.20, 1e-9, "Warmup per-line time @ row 350");
+            AssertNear(t350, 0.30, 1e-9, "Warmup per-line time @ row 350");
 
             // ROIの簡易チェック（行350の先頭・末尾ピクセル）
             unsafe
@@ -51,9 +52,9 @@ internal static class Program
             store.Commit();
 
             // 各500行のブロックを 0.5s / 1.0s / 1.5s で追加
-            PushBlockPattern(store, rows: 500, srcWidth, roiX, valStartRow: 600,  timeSec: 0.5);
-            PushBlockPattern(store, rows: 500, srcWidth, roiX, valStartRow: 1100, timeSec: 1.0);
-            PushBlockPattern(store, rows: 500, srcWidth, roiX, valStartRow: 1600, timeSec: 1.5);
+            PushBlockPattern(store, rows: 500, srcWidth, roiX, valStartRow: 900,  timeSec: 0.5);
+            PushBlockPattern(store, rows: 500, srcWidth, roiX, valStartRow: 1400, timeSec: 1.0);
+            PushBlockPattern(store, rows: 500, srcWidth, roiX, valStartRow: 1900, timeSec: 1.5);
 
             // ★注意: Warmup=500 なので、絶対行でのブロック境界は 500/1000/1500…
             // a) startRow=750（1stブロックの中間）→ 0.75s が正解
@@ -65,6 +66,11 @@ internal static class Program
             Require(store.TryGetWindowPtr(1250, roiW, 500, 0, out var pB, out int strideB, out double tB));
             Console.WriteLine($"   Expected 1.25 s @ abs 1250, Got = {tB:F6} s");
             AssertNear(tB, 1.25, 1e-9, "Interpolated time @ abs row 1250");
+
+            // c) startRow=1250（2ndブロックの中間）→ 1.25s が正解
+            Require(store.TryGetWindowPtr(1400, roiW, 500, 0, out var pC, out int strideC, out double tC));
+            Console.WriteLine($"   Expected 1.40 s @ abs 1400, Got = {tB:F6} s");
+            AssertNear(tC, 1.40, 1e-9, "Interpolated time @ abs row 1250");
 
             Console.WriteLine("== All tests passed ✅ ==");
         }
