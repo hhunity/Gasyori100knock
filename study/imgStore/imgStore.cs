@@ -1,3 +1,4 @@
+// LineStore.cs  (x64 / unsafe 必須)
 using System;
 using System.Runtime.InteropServices;
 using System.Threading;
@@ -7,44 +8,46 @@ namespace YourApp.Imaging
     public enum PixelType { U8 = 0, U16 = 1 }
 
     /// <summary>
-    /// ラインセンサー用ラインバッファ（ROI対応版）
-    /// - 受信画像の一部(ROI)だけを保持：ソース幅 srcWidth のうち [roiX, roiX+roiW) を保存
-    /// - ウォームアップ: 最新 WarmupMax 行を常に 0..WarmupMax-1 に連続配置
-    /// - Commit 後: WarmupMax の続きから線形追記（最大 CapacityLines）
-    /// - 1 writer (PushBlock) + N readers (TryGet...) 前提（ロックなし公開）
-    /// - PushBlock に渡した取得時刻(UTC秒, double)をブロック先頭行に記録
-    /// - TryGetWindowPtr で返す時刻は「窓の先頭行の時刻（ブロック境界で線形補間/外挿）」
+    /// ラインセンサー用ラインバッファ（ROI + 時刻補間）
+    /// - 受信元 srcWidth のうち [roiX, roiX+roiW) だけを保持（以降の Width は roiW）
+    /// - ウォームアップ: 最新 WarmupMax 行を 0..WarmupMax-1 に連続配置
+    ///   * ウォームアップ行は「行ごとの UTC秒(double)」を保持
+    /// - Commit(): 以降 WarmupMax の続きから線形追記
+    ///   * 各 PushBlock の「ブロック先頭(論理行)と時刻」をセグメントに記録
+    ///   * 時刻計算は “窓先頭の絶対行” を内部で論理行に換算して線形補間（直後がなければ外挿）
+    /// - 並行: 1 writer(PushBlock) + N readers(TryGet...) 前提（ロックなし公開）
     /// </summary>
     public unsafe sealed class LineStore : IDisposable
     {
-        // ---- 構成（不変） ----
-        public int      SourceWidth   { get; }      // 受信元の横幅（例: 2048）
-        public int      RoiX          { get; }      // 取り込む開始 x（0..SourceWidth-1）
-        public int      Width         { get; }      // 取り込む幅（= ROI 幅）
-        public long     CapacityLines { get; }      // 行バッファ容量
-        public int      WarmupMax     { get; }      // ウォームアップ行数（コンストラクタで指定）
-        public PixelType PixelType    { get; }
-        public int      ElemSizeBytes { get; }
-        public int      RowBytes      => Width * ElemSizeBytes;
-        public int      SourceRowBytes => SourceWidth * ElemSizeBytes;
+        // 構成
+        public int  SourceWidth    { get; }
+        public int  RoiX           { get; }
+        public int  Width          { get; }     // ROI 幅
+        public long CapacityLines  { get; }
+        public int  WarmupMax      { get; }
+        public PixelType PixelType { get; }
+        public int  ElemSizeBytes  { get; }
+        public int  RowBytes       => Width * ElemSizeBytes;
+        public int  SourceRowBytes => SourceWidth * ElemSizeBytes;
 
-        // ---- 状態 ----
-        private volatile bool _committed;   // false: ウォームアップ, true: 線形追記
-        private int _warmupCount;           // 0..WarmupMax（ウォームアップ中のみ）
-
-        private IntPtr _buf;                // [CapacityLines x RowBytes]
-        private long   _writeIndex;         // Commit 後の次書込位置（WarmupMax から増える）
-        private long   _headTotal;          // 受信成功総行数（統計）
-        private long   _storedLines;        // いま連続で使える行数（0..WarmupMax → WarmupMax..CapacityLines）
+        // 状態
+        private volatile bool _committed;
+        private int _warmupCount;          // 0..WarmupMax
+        private IntPtr _buf;               // [CapacityLines x RowBytes]
+        private long _writeIndex;          // Commit後に増える（WarmupMax から）
+        private long _headTotal;           // 統計
+        private long _storedLines;         // 0..WarmupMax → WarmupMax..CapacityLines
         private volatile bool _disposed;
 
-        // ---- ブロック時刻（補間用）----
-        private struct TimeSeg { public long Start; public double T; } // Start: 0-based 行index
+        // 時刻（ウォームアップ per-line）
+        private double[] _warmupTimes;     // 長さ WarmupMax
+
+        // 時刻（Commit後のセグメント）
+        private struct TimeSeg { public long Start; public double T; } // Start: 論理行(Commit起点)
         private TimeSeg[] _segs = new TimeSeg[64];
-        private int _segCount = 0;                   // Volatile.Write で公開
-        private double _warmupLastTimeSec = double.NaN;
-        // ★ 追加：ウォームアップ領域(0..WarmupMax-1)の各行のUTC秒
-        private double[] _warmupTimes;
+        private int _segCount = 0;         // Volatile.Write で公開
+        private double _warmupLastTimeSec = double.NaN; // ウォームアップ最後のブロック時刻
+        private long _commitBase;          // Commit時点の既存行数（= WarmupMax）
 
         // ---- ctor / dtor ----
         /// <param name="srcWidth">受信元の横幅（例 2048）</param>
@@ -62,18 +65,13 @@ namespace YourApp.Imaging
             if (roiW <= 0 || roiX + roiW > srcWidth) throw new ArgumentOutOfRangeException(nameof(roiW));
             if (capacityLines < warmupMax || warmupMax <= 0) throw new ArgumentOutOfRangeException(nameof(warmupMax));
 
-            SourceWidth   = srcWidth;
-            RoiX          = roiX;
-            Width         = roiW;           // 以降は ROI 幅が "Width"
+            SourceWidth = srcWidth;
+            RoiX = roiX;
+            Width = roiW;
             CapacityLines = capacityLines;
-            WarmupMax     = warmupMax;
-
-            PixelType     = pt;
+            WarmupMax = warmupMax;
+            PixelType = pt;
             ElemSizeBytes = (pt == PixelType.U8) ? 1 : 2;
-
-        // ctor の末尾付近に追加
-        _warmupTimes = new double[WarmupMax];
-        for (int i = 0; i < WarmupMax; i++) _warmupTimes[i] = double.NaN;
 
             checked
             {
@@ -81,9 +79,14 @@ namespace YourApp.Imaging
                 _buf = Marshal.AllocHGlobal((nint)totalBytes);
             }
 
-            _committed   = false;
+            _warmupTimes = new double[WarmupMax];
+            for (int i = 0; i < WarmupMax; i++) _warmupTimes[i] = double.NaN;
+
+            _committed = false;
             _warmupCount = 0;
-            _writeIndex  = 0;
+            _writeIndex = 0;
+            _commitBase = 0;
+
             Volatile.Write(ref _storedLines, 0);
             Interlocked.Exchange(ref _headTotal, 0);
             Volatile.Write(ref _disposed, false);
@@ -96,7 +99,6 @@ namespace YourApp.Imaging
             _buf = IntPtr.Zero;
             Volatile.Write(ref _disposed, true);
         }
-
         /// <summary>
         /// ウォームアップ終了。現在の WarmupMax 行の続きから線形追記に移行。
         /// start=0 の基準時刻セグメントを 1 つ作成。
@@ -109,9 +111,12 @@ namespace YourApp.Imaging
             if (double.IsNaN(_warmupLastTimeSec))
                 _warmupLastTimeSec = DateTimeToUnixSec(DateTime.UtcNow);
 
+            // start=0 (論理) の基準点を追加
             AddSeg(0, _warmupLastTimeSec);
 
-            _writeIndex = _warmupCount; // 通常 = WarmupMax
+            _writeIndex = _warmupCount;  // 通常 WarmupMax
+            _commitBase = _warmupCount;  // 論理0の基準（絶対→論理変換に使用）
+
             Volatile.Write(ref _storedLines, _warmupCount);
             Volatile.Write(ref _committed, true);
         }
@@ -121,10 +126,11 @@ namespace YourApp.Imaging
         public bool PushBlock(IntPtr src, int rows, int srcStrideBytes)
             => PushBlock(src, rows, srcStrideBytes, DateTimeToUnixSec(DateTime.UtcNow));
 
+        // PushBlock（DateTime）
         public bool PushBlock(IntPtr src, int rows, int srcStrideBytes, DateTime acquiredUtc)
             => PushBlock(src, rows, srcStrideBytes, DateTimeToUnixSec(acquiredUtc.ToUniversalTime()));
 
-        /// <summary>
+          /// <summary>
         /// 受信ブロックを取り込み。src はソース幅 SourceWidth の画素行、stride はそのバイトピッチ。
         /// 保持するのは ROI [RoiX..RoiX+Width) のみ。
         /// 取得時刻はこのブロック先頭行の時刻（UTC秒, double）。
@@ -148,12 +154,12 @@ namespace YourApp.Imaging
             }
         }
 
-        // ---- ウォームアップ（最新 WarmupMax 行のみ保持）----
+        // ウォームアップ
         private void PushWarmup(IntPtr src, int rows, int srcStrideBytes, double timeSec)
         {
             byte* sBase = (byte*)src;
             byte* dBase = (byte*)_buf;
-            int   roiByteOffset = RoiX * ElemSizeBytes;
+            int roiByteOffset = RoiX * ElemSizeBytes;
 
             int filled = _warmupCount; // 0..WarmupMax
 
@@ -161,18 +167,15 @@ namespace YourApp.Imaging
             if (filled < WarmupMax)
             {
                 int need = WarmupMax - filled;
-                int take = rows < need ? rows : need;
+                int take = (rows < need) ? rows : need;
 
-                // 1) 満杯まで埋める  の if (filled < WarmupMax) ブロック内、コピーの直後に追加              }
-
-                // ROIコピー（1行ずつ。roiX>0 なら必ず行ループ）
                 for (int i = 0; i < take; i++)
                 {
                     byte* srcLine = sBase + (long)i * srcStrideBytes + roiByteOffset;
                     byte* dstLine = dBase + (long)(filled + i) * RowBytes;
                     Buffer.MemoryCopy(srcLine, dstLine, RowBytes, RowBytes);
 
-                    _warmupTimes[filled + i] = timeSec;   // ← 行ごとに同じ取得時刻を付与
+                    _warmupTimes[filled + i] = timeSec; // per-line 時刻
                 }
 
                 filled += take;
@@ -189,31 +192,25 @@ namespace YourApp.Imaging
                 }
             }
 
-            // 2) 満杯（WarmupMax 行）状態の更新
+            // 2) 満杯状態の更新
             if (rows >= WarmupMax)
             {
-                // 2) 満杯・置換の分岐内のコピーの直後に追加
-                for (int i = 0; i < WarmupMax; i++)
-                {
-                    _warmupTimes[i] = timeSec;            // ← 全部このブロックの時刻
-                }
-
-                // ブロック末尾 WarmupMax 行で置換
                 byte* tail = sBase + (long)(rows - WarmupMax) * srcStrideBytes;
                 for (int i = 0; i < WarmupMax; i++)
                 {
                     byte* srcLine = tail + (long)i * srcStrideBytes + roiByteOffset;
                     byte* dstLine = dBase + (long)i * RowBytes;
                     Buffer.MemoryCopy(srcLine, dstLine, RowBytes, RowBytes);
+                    _warmupTimes[i] = timeSec;
                 }
                 Volatile.Write(ref _storedLines, WarmupMax);
             }
             else // 0 < rows < WarmupMax
             {
-                int shift = rows;                 // 左詰め量
-                int keep  = WarmupMax - shift;    // 残す本数
+                int shift = rows;
+                int keep  = WarmupMax - shift;
 
-                // 前詰め（オーバーラップあり：y昇順）
+                // 前詰め（画像・時刻）
                 for (int y = 0; y < keep; y++)
                 {
                     byte* srcRow = dBase + (long)(y + shift) * RowBytes;
@@ -222,25 +219,24 @@ namespace YourApp.Imaging
 
                     _warmupTimes[y] = _warmupTimes[y + shift];
                 }
-  
-                // 末尾に rows 行の ROI を配置
+
+                // 末尾に rows 行追加（画像・時刻）
                 for (int i = 0; i < rows; i++)
                 {
                     byte* srcLine = sBase + (long)i * srcStrideBytes + roiByteOffset;
                     byte* dstLine = dBase + (long)(keep + i) * RowBytes;
                     Buffer.MemoryCopy(srcLine, dstLine, RowBytes, RowBytes);
 
-                    // 既存の画素コピーの直後でOK
-                     _warmupTimes[keep + i] = timeSec;
+                    _warmupTimes[keep + i] = timeSec;
                 }
 
                 Volatile.Write(ref _storedLines, WarmupMax);
             }
 
-            _warmupLastTimeSec = timeSec; // 最新ブロックの時刻
+            _warmupLastTimeSec = timeSec;
         }
 
-        // ---- Commit 後：線形追記。先頭行の時刻をセグメントに記録 ----
+        // Commit後：線形追記
         private bool PushLinear(IntPtr src, int rows, int srcStrideBytes, double timeSec)
         {
             long remain = CapacityLines - _writeIndex;
@@ -248,15 +244,15 @@ namespace YourApp.Imaging
 
             int can = (int)Math.Min(remain, rows);
 
-            // このブロックの先頭行と時刻を追加（補間用）
-            long startOfBlock = _writeIndex;
-            AddSeg(startOfBlock, timeSec);
+            // セグメント（論理行で登録）
+            long startAbs = _writeIndex;
+            long startLog = startAbs - _commitBase;
+            AddSeg(startLog, timeSec);
 
             byte* sBase = (byte*)src;
             byte* dBase = (byte*)_buf + _writeIndex * RowBytes;
-            int   roiByteOffset = RoiX * ElemSizeBytes;
+            int roiByteOffset = RoiX * ElemSizeBytes;
 
-            // ROIコピー（通常は1行ずつ。roiX==0 かつ srcStrideBytes==RowBytes の場合のみ一括最適化可）
             if (RoiX == 0 && srcStrideBytes == RowBytes)
             {
                 long bytes = (long)can * RowBytes;
@@ -279,10 +275,10 @@ namespace YourApp.Imaging
             if (newStored > Volatile.Read(ref _storedLines))
                 Volatile.Write(ref _storedLines, newStored);
 
-            return can == rows; // 途中満了なら false
+            return can == rows;
         }
 
-        // ---- セグメント管理 ----
+        // セグメント管理
         private void AddSeg(long start, double t)
         {
             int n = _segCount;
@@ -293,44 +289,37 @@ namespace YourApp.Imaging
                 _segs = bigger;
             }
             _segs[n].Start = start;
-            _segs[n].T = t;
+            _segs[n].T     = t;
             Volatile.Write(ref _segCount, n + 1);
         }
 
-                // ---- 行 index の時刻をセグメントで線形補間（なければ外挿/定数）----
+        // 行の時刻（絶対行を受け、ウォームアップは per-line、以降は論理行補間/外挿）
         private double RowTimeSec(long rowAbs)
         {
-            // ★ Commit 前は全部ウォームアップ扱い
             if (!Volatile.Read(ref _committed))
             {
                 int idx = (int)rowAbs;
-                // 範囲チェック（呼び出し側が StoredLines を見ている前提で通常OK）
                 if (idx >= 0 && idx < _warmupCount && !double.IsNaN(_warmupTimes[idx]))
                     return _warmupTimes[idx];
-        
-                // フォールバック（通常来ない）
                 return double.IsNaN(_warmupLastTimeSec) ? DateTimeToUnixSec(DateTime.UtcNow) : _warmupLastTimeSec;
             }
-        
-            // ★ Commit 後でも、ウォームアップ領域(0.._commitBase-1)は per-line 時刻をそのまま返す
+
             if (rowAbs < _commitBase)
             {
                 int idx = (int)rowAbs;
                 if (idx >= 0 && idx < WarmupMax && !double.IsNaN(_warmupTimes[idx]))
                     return _warmupTimes[idx];
-        
-                // ありえない場合の保険
                 return _warmupLastTimeSec;
             }
-        
-            // ここからは従来どおり：論理行に変換してセグメント補間
+
             int n = Volatile.Read(ref _segCount);
             if (n == 0)
                 return double.IsNaN(_warmupLastTimeSec) ? DateTimeToUnixSec(DateTime.UtcNow) : _warmupLastTimeSec;
-        
-            long row = rowAbs - _commitBase;    // 絶対→論理
+
+            long row = rowAbs - _commitBase; // 論理行
             var arr = _segs;
-        
+
+            // max(Start <= row) を二分探索
             int lo = 0, hi = n - 1, k = -1;
             while (lo <= hi)
             {
@@ -339,7 +328,7 @@ namespace YourApp.Imaging
                 if (s <= row) { k = mid; lo = mid + 1; }
                 else          { hi = mid - 1; }
             }
-        
+
             if (k < 0) return arr[0].T;
             if (k == n - 1)
             {
@@ -348,12 +337,12 @@ namespace YourApp.Imaging
                     var p1 = arr[n - 2]; var p2 = arr[n - 1];
                     long   dx = p2.Start - p1.Start;
                     double dt = p2.T     - p1.T;
-                    double a  = (dx > 0) ? dt / dx : 0.0;
+                    double a  = (dx > 0) ? dt / dx : 0.0; // 秒/行
                     return p2.T + (row - p2.Start) * a;  // 勾配外挿
                 }
                 return arr[n - 1].T;
             }
-        
+
             var prev = arr[k];
             var next = arr[k + 1];
             long drow = next.Start - prev.Start;
@@ -362,11 +351,11 @@ namespace YourApp.Imaging
             return prev.T + (row - prev.Start) * slope;
         }
 
-        // ---- 公開情報 ----
+        // 公開情報
         public long HeadTotal   => Interlocked.Read(ref _headTotal);
         public long StoredLines => Volatile.Read(ref _storedLines);
 
-        // ---- 取得API（窓の先頭行の時刻も返す）----
+        // 取得API（時刻＝窓先頭行の時刻）
         public bool TryGetLatestWindowPtr(int winW, int winH, int x0,
                                           out IntPtr ptr, out int strideBytes, out double timeSecAtTop)
         {
@@ -401,22 +390,19 @@ namespace YourApp.Imaging
             return true;
         }
 
-        // 互換（時刻を返さない版）
+        // 互換（時刻なし）
         public bool TryGetLatestWindowPtr(int winW, int winH, int x0, out IntPtr ptr, out int strideBytes)
             => TryGetLatestWindowPtr(winW, winH, x0, out ptr, out strideBytes, out _);
-
-        public bool TryGetWindowPtr(long startRow, int winW, int winH, int x0,
-                                    out IntPtr ptr, out int strideBytes)
+        public bool TryGetWindowPtr(long startRow, int winW, int winH, int x0, out IntPtr ptr, out int strideBytes)
             => TryGetWindowPtr(startRow, winW, winH, x0, out ptr, out strideBytes, out _);
 
-        // ---- ユーティリティ ----
+        // Utils
         private static int Clamp(int v, int min, int max)
         {
             if (v < min) return min;
             if (v > max) return max;
             return v;
         }
-
         private static double DateTimeToUnixSec(DateTime utc)
         {
             var epoch = new DateTime(1970, 1, 1, 0, 0, 0, DateTimeKind.Utc);
