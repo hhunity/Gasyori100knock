@@ -59,6 +59,7 @@
         "map": "cpp",
         "sstream": "cpp",
         "__config": "cpp",
-        "iomanip": "cpp"
+        "iomanip": "cpp",
+        "memory": "cpp"
     }
 }
