@@ -5,6 +5,28 @@
 #include <filesystem>
 #include <iostream>
 
+#include <string>
+#include <windows.h>
+
+std::string WStringToUtf8(const std::wstring& wstr)
+{
+    if (wstr.empty()) return std::string();
+    int sizeNeeded = WideCharToMultiByte(CP_UTF8, 0, wstr.c_str(),
+                                         (int)wstr.size(), NULL, 0, NULL, NULL);
+    std::string str(sizeNeeded, 0);
+    WideCharToMultiByte(CP_UTF8, 0, wstr.c_str(),
+                        (int)wstr.size(), &str[0], sizeNeeded, NULL, NULL);
+    return str;
+}
+
+int main()
+{
+    std::wstring ws = L"C:\\Users\\星加\\AppData\\Local\\HoshikaWorks\\MyApp\\Debug";
+    std::string utf8 = WStringToUtf8(ws);
+
+    printf("UTF-8: %s\n", utf8.c_str());
+}
+
 int main() {
     wchar_t path[MAX_PATH];
     if (SUCCEEDED(SHGetFolderPathW(NULL, CSIDL_LOCAL_APPDATA, NULL, 0, path))) {
