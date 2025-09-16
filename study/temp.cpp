@@ -1,4 +1,19 @@
+// デバッグフォルダ作成
 
+#include <windows.h>
+#include <shlobj.h>   // SHGetFolderPath
+#include <filesystem>
+#include <iostream>
+
+int main() {
+    wchar_t path[MAX_PATH];
+    if (SUCCEEDED(SHGetFolderPathW(NULL, CSIDL_LOCAL_APPDATA, NULL, 0, path))) {
+        std::filesystem::path debugPath = std::filesystem::path(path) / L"MyApp" / L"Debug";
+        std::filesystem::create_directories(debugPath);
+
+        std::wcout << L"Debug folder: " << debugPath << std::endl;
+    }
+}
 
 
 
