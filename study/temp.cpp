@@ -1,3 +1,47 @@
+using System;
+using System.Globalization;
+using System.Windows.Data;
+using System.Windows.Media.Imaging;
+
+public class PathToBitmapConverter : IValueConverter
+{
+    public object? Convert(object? value, Type targetType, object? parameter, CultureInfo culture)
+    {
+        var path = value as string;
+        if (string.IsNullOrEmpty(path)) return null;
+
+        try
+        {
+            var bmp = new BitmapImage();
+            bmp.BeginInit();
+            bmp.CacheOption = BitmapCacheOption.OnLoad;  // ロック回避
+            bmp.CreateOptions = BitmapCreateOptions.IgnoreImageCache;
+            bmp.UriSource = new Uri(path, UriKind.Absolute);
+            bmp.EndInit();
+            bmp.Freeze();  // スレッドセーフ化
+            return bmp;
+        }
+        catch
+        {
+            return null;
+        }
+    }
+
+    public object? ConvertBack(object? value, Type targetType, object? parameter, CultureInfo culture)
+    {
+        return null; // 逆方向の変換は不要
+    }
+}
+
+<Window.Resources>
+    <local:PathToBitmapConverter x:Key="PathToBitmapConverter"/>
+</Window.Resources>
+
+xmlns:local="clr-namespace:YourAppNamespace"
+
+
+
+
 
 1.	概要
 	•	アプリの目的・機能概要
