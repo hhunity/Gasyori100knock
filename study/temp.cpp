@@ -1,4 +1,102 @@
 using System;
+using System.Runtime.InteropServices;
+
+internal static class IttApi
+{
+    private const string Dll = "ittnotify.dll";
+
+    [DllImport(Dll)]
+    private static extern IntPtr __itt_domain_create(string name);
+
+    [DllImport(Dll)]
+    private static extern IntPtr __itt_string_handle_create(string name);
+
+    [DllImport(Dll)]
+    private static extern void __itt_task_begin(IntPtr domain, IntPtr parent, IntPtr id, IntPtr handle);
+
+    [DllImport(Dll)]
+    private static extern void __itt_task_end(IntPtr domain);
+
+    // 使いやすいラッパ
+    private static readonly IntPtr domain = __itt_domain_create("CSharpTasks");
+
+    public static void Begin(string name)
+    {
+        var handle = __itt_string_handle_create(name);
+        __itt_task_begin(domain, IntPtr.Zero, IntPtr.Zero, handle);
+    }
+
+    public static void End()
+    {
+        __itt_task_end(domain);
+    }
+}
+
+using System;
+using System.Threading;
+using System.Threading.Tasks;
+
+class Program
+{
+    static async Task Main()
+    {
+        Console.WriteLine("Start");
+
+        var tasks = new[]
+        {
+            Task.Run(() => Work("TaskA")),
+            Task.Run(() => Work("TaskB")),
+            Task.Run(() => Work("TaskC")),
+        };
+
+        await Task.WhenAll(tasks);
+    }
+
+    static void Work(string name)
+    {
+        IttApi.Begin(name);      // ← VTune上で帯が始まる
+        Thread.Sleep(3000);      // 擬似処理
+        IttApi.End();            // ← 帯が終わる
+    }
+}
+
+using System;
+using System.Threading;
+using System.Threading.Tasks;
+
+class Program
+{
+    static async Task Main()
+    {
+        var tasks = new[]
+        {
+            Task.Run(() => Work("Thread-A")),
+            Task.Run(() => Work("Thread-B")),
+            Task.Run(() => Work("Thread-C")),
+        };
+
+        await Task.WhenAll(tasks);
+    }
+
+    static void Work(string threadName)
+    {
+        // ここでスレッド名を設定
+        Thread.CurrentThread.Name = threadName;
+
+        Console.WriteLine($"[{threadName}] start");
+        Thread.Sleep(3000);
+        Console.WriteLine($"[{threadName}] end");
+    }
+}
+
+
+
+
+
+
+
+
+using System;
 using System.Diagnostics;
 
 class Program
