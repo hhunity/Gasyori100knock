@@ -1,4 +1,100 @@
 using System;
+using System.Collections.Concurrent;
+using System.Runtime.InteropServices;
+
+internal static class Itt
+{
+    private const string Dll = "ittnotify_collector.dll";
+
+    // ---- ITT native (cdecl + ANSI が大事) ----
+    [DllImport(Dll, CallingConvention = CallingConvention.Cdecl, CharSet = CharSet.Ansi)]
+    private static extern IntPtr __itt_domain_create(string name);
+
+    [DllImport(Dll, CallingConvention = CallingConvention.Cdecl, CharSet = CharSet.Ansi)]
+    private static extern IntPtr __itt_string_handle_create(string name);
+
+    [DllImport(Dll, CallingConvention = CallingConvention.Cdecl)]
+    private static extern void __itt_task_begin(
+        IntPtr domain, IntPtr parent, IntPtr id, IntPtr handle);
+
+    [DllImport(Dll, CallingConvention = CallingConvention.Cdecl)]
+    private static extern void __itt_task_end(IntPtr domain);
+
+    // optional: 瞬間マーカー（縦線）
+    [DllImport(Dll, CallingConvention = CallingConvention.Cdecl, CharSet = CharSet.Ansi)]
+    private static extern void __itt_marker(
+        IntPtr domain, int scope /*__itt_marker_scope*/, string name, IntPtr id);
+
+    private static readonly IntPtr Domain;
+    private static readonly bool Available;
+    private static readonly ConcurrentDictionary<string, IntPtr> HandleCache = new();
+
+    static Itt()
+    {
+        try
+        {
+            Domain = __itt_domain_create("CSharp");
+            Available = Domain != IntPtr.Zero;
+        }
+        catch
+        {
+            Available = false; // DLL未配置でもアプリは落とさない
+        }
+    }
+
+    private static IntPtr GetHandle(string name)
+        => HandleCache.GetOrAdd(name, n => __itt_string_handle_create(n));
+
+    /// <summary>区間開始（タイムラインに「帯」）</summary>
+    public static void Begin(string taskName)
+    {
+        if (!Available) return;
+        try { __itt_task_begin(Domain, IntPtr.Zero, IntPtr.Zero, GetHandle(taskName)); }
+        catch { /* ignore */ }
+    }
+
+    /// <summary>区間終了</summary>
+    public static void End()
+    {
+        if (!Available) return;
+        try { __itt_task_end(Domain); } catch { /* ignore */ }
+    }
+
+    /// <summary>using で安全に区間マーカー</summary>
+    public sealed class Scope : IDisposable
+    {
+        private readonly bool _begun;
+        public Scope(string taskName)
+        {
+            if (Available)
+            {
+                try
+                {
+                    __itt_task_begin(Domain, IntPtr.Zero, IntPtr.Zero, GetHandle(taskName));
+                    _begun = true;
+                }
+                catch { _begun = false; }
+            }
+        }
+        public void Dispose()
+        {
+            if (_begun)
+            {
+                try { __itt_task_end(Domain); } catch { /* ignore */ }
+            }
+        }
+    }
+
+    /// <summary>瞬間マーカー（縦線）。scope=2 は task スコープ相当</summary>
+    public static void Mark(string name, int scope = 2)
+    {
+        if (!Available) return;
+        try { __itt_marker(Domain, scope, name, IntPtr.Zero); } catch { /* ignore */ }
+    }
+}
+
+
+using System;
 using System.Runtime.InteropServices;
 
 internal static class IttApi
