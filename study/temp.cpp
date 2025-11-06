@@ -1,3 +1,49 @@
+using System;
+using System.Diagnostics;
+
+class Program
+{
+    static void Main()
+    {
+        const int N = 1 << 28; // 約2億要素 ≈ 1.6GB (double×3配列)
+        double[] A = new double[N];
+        double[] B = new double[N];
+        double[] C = new double[N];
+        double alpha = 3.14;
+
+        // 初期化
+        for (int i = 0; i < N; i++)
+        {
+            A[i] = 1.0;
+            B[i] = 2.0;
+            C[i] = 3.0;
+        }
+
+        // ウォームアップ（JITの影響を除く）
+        for (int w = 0; w < 2; w++)
+        {
+            for (int i = 0; i < N; i++)
+                A[i] = B[i] + alpha * C[i];
+        }
+
+        // 計測
+        Stopwatch sw = Stopwatch.StartNew();
+        for (int i = 0; i < N; i++)
+            A[i] = B[i] + alpha * C[i];
+        sw.Stop();
+
+        double seconds = sw.Elapsed.TotalSeconds;
+
+        // 理論的なメモリアクセス量：B,Cから読み込み16B + Aへ書き込み8B = 24B
+        double bytesMoved = N * 24.0;
+        double gbps = bytesMoved / (seconds * 1e9);
+
+        Console.WriteLine($"Time = {seconds:F3} s, Bandwidth ≈ {gbps:F1} GB/s");
+    }
+}
+
+
+
 // Simple STREAM-like triad (C++17, x64 Release, /O2, /arch:AVX2/AVX512)
 #include <chrono>
 #include <vector>
