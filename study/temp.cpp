@@ -1,3 +1,25 @@
+// Simple STREAM-like triad (C++17, x64 Release, /O2, /arch:AVX2/AVX512)
+#include <chrono>
+#include <vector>
+#include <cstdio>
+int main(){
+    const size_t N = (size_t)1<<28; // ~2.1e8 elements ≈ 800MB for doubles
+    std::vector<double> A(N,1.0), B(N,2.0), C(N,3.0);
+    const double alpha = 3.14;
+    // warmup
+    for(int w=0; w<2; ++w) for(size_t i=0;i<N;++i) A[i]=B[i]+alpha*C[i];
+
+    auto t0 = std::chrono::high_resolution_clock::now();
+    for(size_t i=0;i<N;++i) A[i]=B[i]+alpha*C[i]; // 2 loads + 1 load + 1 store
+    auto t1 = std::chrono::high_resolution_clock::now();
+    double s = std::chrono::duration<double>(t1-t0).count();
+    // bytes moved ≈ (reads B,C) 16B + (write A) 8B = 24B per iter (理想化)
+    double gbps = (N * 24.0) / (s * 1e9);
+    std::printf("Time=%.3fs  Bandwidth≈%.1f GB/s\n", s, gbps);
+}
+
+
+
 using System;
 using System.Globalization;
 using System.Windows.Data;
