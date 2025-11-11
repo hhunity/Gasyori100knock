@@ -1,3 +1,51 @@
+#include <opencv2/opencv.hpp>
+#include <cmath>
+
+void sobel_magnitude_32f_C1_borderDefault(const cv::Mat& src, cv::Mat& dst)
+{
+    CV_Assert(src.type() == CV_32FC1);
+
+    dst.create(src.size(), CV_32FC1);
+    if (src.rows < 1 || src.cols < 1) { dst.setTo(0); return; }
+    if (src.rows == 1 || src.cols == 1) { dst.setTo(0); return; } // 3x3未満は勾配ゼロ扱い
+
+    // 1pxパディング（BORDER_DEFAULT == BORDER_REFLECT_101）
+    cv::Mat pad;
+    cv::copyMakeBorder(src, pad, 1, 1, 1, 1, cv::BORDER_DEFAULT);
+
+    const int rows = src.rows;
+    const int cols = src.cols;
+
+    // pad は (rows+2) x (cols+2) なので、中心(1..rows, 1..cols)が元画像に対応
+    cv::parallel_for_(cv::Range(0, rows), [&](const cv::Range& r){
+        for (int y = r.start; y < r.end; ++y)
+        {
+            const float* p0 = pad.ptr<float>(y + 0); // (y-1) in src
+            const float* p1 = pad.ptr<float>(y + 1); // (y)
+            const float* p2 = pad.ptr<float>(y + 2); // (y+1)
+            float*       pd = dst.ptr<float>(y);
+
+            // x は pad では 1..cols が元画像の 0..cols-1 に対応
+            for (int x = 0; x < cols; ++x)
+            {
+                const int xx = x + 1;
+
+                const float gx =
+                      (p0[xx + 1] - p0[xx - 1])
+                    + 2.0f * (p1[xx + 1] - p1[xx - 1])
+                    + (p2[xx + 1] - p2[xx - 1]);
+
+                const float gy =
+                      (p2[xx - 1] + 2.0f * p2[xx] + p2[xx + 1])
+                    - (p0[xx - 1] + 2.0f * p0[xx] + p0[xx + 1]);
+
+                pd[x] = std::sqrt(gx * gx + gy * gy);   // L2ノルム
+                // pd[x] = std::fabs(gx) + std::fabs(gy); // L1ノルムにしたい場合
+            }
+        }
+    });
+}
+
 
 cv::Mat mag(src.size(), CV_32F);
 
