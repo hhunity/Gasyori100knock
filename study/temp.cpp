@@ -1,3 +1,73 @@
+
+#include <ftxui/component/screen_interactive.hpp>
+#include <ftxui/component/component.hpp>
+#include <ftxui/dom/elements.hpp>
+#include <thread>
+#include <atomic>
+#include <vector>
+#include <string>
+using namespace ftxui;
+using namespace std::chrono_literals;
+
+enum class Page { Menu, Task };
+
+int main() {
+  auto screen = ScreenInteractive::TerminalOutput();
+  Page page = Page::Menu;
+  std::vector<std::string> logs;
+  std::atomic<bool> running{false};
+  int progress = 0;
+
+  auto start_task = [&] {
+    if (running) return;
+    running = true;
+    logs.clear();
+    std::thread([&] {
+      for (int i = 1; i <= 10; ++i) {
+        logs.push_back("step " + std::to_string(i) + "/10 done");
+        progress = i * 10;
+        screen.PostEvent(Event::Custom); // 再描画
+        std::this_thread::sleep_for(300ms);
+      }
+      running = false;
+      page = Page::Menu;
+      screen.PostEvent(Event::Custom);
+    }).detach();
+  };
+
+  std::vector<std::string> menu_items = {"Run task", "Exit"};
+  int selected = 0;
+  auto menu = Menu(&menu_items, &selected);
+  menu |= CatchEvent([&](Event e) {
+    if (e == Event::Return) {
+      if (selected == 0) { page = Page::Task; start_task(); }
+      else if (selected == 1) screen.Exit();
+      return true;
+    }
+    return false;
+  });
+
+  auto task_view = Renderer([&] {
+    std::vector<Element> lines;
+    for (auto& s : logs) lines.push_back(text(s));
+    return vbox({
+      text("Running task...") | bold,
+      gauge(progress / 100.0f),
+      vbox(std::move(lines)) | vscroll_indicator | yframe,
+    }) | border;
+  });
+
+  auto root = Renderer([&] {
+    if (page == Page::Menu)
+      return window(text("Menu"), menu->Render()) | border;
+    else
+      return task_view->Render();
+  });
+
+  screen.Loop(root);
+}
+
+
 #include <ftxui/component/screen_interactive.hpp>
 #include <ftxui/component/component.hpp>
 #include <ftxui/dom/elements.hpp>
