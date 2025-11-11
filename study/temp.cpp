@@ -1,3 +1,24 @@
+
+cv::Mat mag(src.size(), CV_32F);
+
+cv::parallel_for_(cv::Range(1, src.rows-1), [&](const cv::Range& r){
+    for (int y = r.start; y < r.end; ++y) {
+        const uchar* p0 = src.ptr<uchar>(y-1);
+        const uchar* p1 = src.ptr<uchar>(y);
+        const uchar* p2 = src.ptr<uchar>(y+1);
+        float* pm = mag.ptr<float>(y);
+        for (int x = 1; x < src.cols-1; ++x) {
+            int gx =  (p0[x+1] - p0[x-1])
+                    + 2*(p1[x+1] - p1[x-1])
+                    +   (p2[x+1] - p2[x-1]);
+            int gy =  (p2[x-1] + 2*p2[x] + p2[x+1])
+                    - (p0[x-1] + 2*p0[x] + p0[x+1]);
+            pm[x] = std::sqrt(float(gx*gx + gy*gy));   // or |gx|+|gy|
+        }
+    }
+});
+
+
 using System;
 using System.Collections.Concurrent;
 using System.Runtime.InteropServices;
