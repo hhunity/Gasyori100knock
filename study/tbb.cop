@@ -1,0 +1,302 @@
+// g++ main.cpp -std=c++17 -ltbb -lebussdk ...（実際のリンクは環境に合わせて）
+// 送受信や eBUS の include パス/ライブラリはあなたの環境に合わせてください。
+
+#include <tbb/flow_graph.h>
+#include <atomic>
+#include <chrono>
+#include <cstdint>
+#include <cstring>
+#include <iostream>
+#include <thread>
+#include <vector>
+#include <optional>
+
+// ==== eBUS SDK ====
+#include <PvSystem.h>
+#include <PvDevice.h>
+#include <PvStream.h>
+#include <PvPipeline.h>
+#include <PvBuffer.h>
+#include <PvResult.h>
+#include <PvPayloadType.h>
+
+// ==== 送信（例：UDP）====
+#ifdef _WIN32
+  #include <winsock2.h>
+  #pragma comment(lib, "Ws2_32.lib")
+#else
+  #include <sys/socket.h>
+  #include <arpa/inet.h>
+  #include <unistd.h>
+#endif
+
+using namespace std::chrono_literals;
+
+// ----------------------------------------------------------------------
+// データ型
+// ----------------------------------------------------------------------
+struct HostFrame {
+  uint64_t frame_id{};
+  int width{}, height{}, stride{};        // stride は 1行のバイト幅
+  std::vector<uint8_t> data;              // 自前保持（SDKバッファからコピー）
+};
+
+struct ProcResult {
+  uint64_t frame_id{};
+  std::vector<uint8_t> payload;           // 送信用に整形済みのバイト列
+};
+
+struct TxPacket {
+  uint64_t frame_id{};
+  const uint8_t* ptr{};
+  size_t len{};
+};
+
+// ----------------------------------------------------------------------
+// eBUS 初期化/後始末ユーティリティ
+// ----------------------------------------------------------------------
+struct EbusContext {
+  PvSystem     system;
+  PvDevice*    device   = nullptr;
+  PvStream*    stream   = nullptr;
+  PvPipeline*  pipeline = nullptr;
+
+  bool open_first_device() {
+    // 検出
+    PvResult r = system.Find();
+    if (!r.IsOK() || system.GetInterfaceCount() == 0) {
+      std::cerr << "No interface found. PvSystem.Find failed.\n";
+      return false;
+    }
+
+    // デバイス探索（単純に最初のデバイス）
+    PvDeviceInfo* devInfo = nullptr;
+    for (uint32_t i = 0; i < system.GetInterfaceCount(); ++i) {
+      auto* itf = system.GetInterface(i);
+      for (uint32_t d = 0; d < itf->GetDeviceCount(); ++d) {
+        devInfo = itf->GetDeviceInfo(d);
+        if (devInfo) break;
+      }
+      if (devInfo) break;
+    }
+    if (!devInfo) {
+      std::cerr << "No device found.\n";
+      return false;
+    }
+
+    // Open device
+    device = PvDevice::CreateAndConnect(devInfo, &r);
+    if (!device || !r.IsOK()) {
+      std::cerr << "CreateAndConnect failed: " << r.GetCodeString().GetAscii() << "\n";
+      return false;
+    }
+
+    // Open stream
+    stream = PvStream::CreateAndOpen(devInfo->GetConnectionID(), &r);
+    if (!stream || !r.IsOK()) {
+      std::cerr << "Stream open failed: " << r.GetCodeString().GetAscii() << "\n";
+      return false;
+    }
+
+    // Pipeline 準備
+    pipeline = new PvPipeline(stream);
+    pipeline->SetBufferCount(64); // 取り込み側の最低バッファ（用途で調整）
+    pipeline->SetBufferSize(0);   // 自動（デバイスのpayloadに追随）
+    r = pipeline->Start();
+    if (!r.IsOK()) {
+      std::cerr << "Pipeline start failed: " << r.GetCodeString().GetAscii() << "\n";
+      return false;
+    }
+
+    // Acquisition start
+    device->GetParameters()->SetEnumValue("AcquisitionMode", "Continuous");
+    r = device->GetParameters()->ExecuteCommand("AcquisitionStart");
+    if (!r.IsOK()) {
+      std::cerr << "AcquisitionStart failed: " << r.GetCodeString().GetAscii() << "\n";
+      return false;
+    }
+
+    return true;
+  }
+
+  void close() {
+    if (device) {
+      device->GetParameters()->ExecuteCommand("AcquisitionStop");
+    }
+    if (pipeline) {
+      pipeline->Stop();
+      delete pipeline;
+      pipeline = nullptr;
+    }
+    if (stream) {
+      stream->Close();
+      PvStream::Free(stream);
+      stream = nullptr;
+    }
+    if (device) {
+      PvDevice::Free(device);
+      device = nullptr;
+    }
+  }
+};
+
+// ----------------------------------------------------------------------
+// 画像処理（CPUダミー）：ここを実処理に差し替え
+// ----------------------------------------------------------------------
+ProcResult process_cpu(const HostFrame& f) {
+  ProcResult r;
+  r.frame_id = f.frame_id;
+  r.payload = f.data; // ここではそのまま。実際は畳み込み/FFT/特徴量化/圧縮など
+  return r;
+}
+
+// ----------------------------------------------------------------------
+// 送信（UDP バッチ雛形）
+//  ※ 実環境に合わせて sendmmsg/RIO などへ差し替えてください
+// ----------------------------------------------------------------------
+class UdpSender {
+public:
+  UdpSender(const char* ip, uint16_t port) {
+#ifdef _WIN32
+    WSADATA wsa; WSAStartup(MAKEWORD(2,2), &wsa);
+#endif
+    sock_ = ::socket(AF_INET, SOCK_DGRAM, 0);
+    std::memset(&addr_, 0, sizeof(addr_));
+    addr_.sin_family = AF_INET;
+    addr_.sin_port   = htons(port);
+    addr_.sin_addr.s_addr = inet_addr(ip);
+  }
+  ~UdpSender() {
+#ifdef _WIN32
+    closesocket(sock_);
+    WSACleanup();
+#else
+    if (sock_ >= 0) ::close(sock_);
+#endif
+  }
+  void send_batch(const std::vector<TxPacket>& batch) {
+    for (auto& p : batch) {
+      ::sendto(sock_, (const char*)p.ptr, (int)p.len, 0,
+               (struct sockaddr*)&addr_, sizeof(addr_));
+    }
+  }
+
+private:
+  int sock_{-1};
+  struct sockaddr_in addr_{};
+};
+
+// ----------------------------------------------------------------------
+// メイン：eBUS + TBB flow_graph
+//   queue_node で「貯める」→ function_node(unlimited) で処理 → 送信
+// ----------------------------------------------------------------------
+int main() {
+  // -------- eBUS 準備 --------
+  EbusContext ebus;
+  if (!ebus.open_first_device()) {
+    std::cerr << "eBUS open failed.\n";
+    return 1;
+  }
+
+  // フレーム寸法は動的に取得しても良いが、ここでは Retrieve 後に決定
+  std::atomic<bool> running{true};
+  std::atomic<uint64_t> frame_counter{0};
+
+  // -------- TBB グラフ --------
+  tbb::flow::graph g;
+
+  // 取り込み→処理のキュー（“貯める”場所）。無制限だと危険なので limiter を併用推奨
+  tbb::flow::queue_node<HostFrame> q_in(g);
+
+  // 処理ノード（並列無制限）
+  tbb::flow::function_node<HostFrame, ProcResult>
+  n_proc(g, tbb::flow::unlimited, [](const HostFrame& f) {
+    return process_cpu(f);
+  });
+
+  // 処理→送信のキュー
+  tbb::flow::queue_node<ProcResult> q_out(g);
+
+  // 送信ノード（並列無制限・バッチングは別スレッドでもOK）
+  tbb::flow::function_node<ProcResult, tbb::flow::continue_msg>
+  n_tx(g, tbb::flow::unlimited, [](const ProcResult& r) {
+    // ここでは何もしない（下の送信スレッドでバッチ送信）
+    (void)r;
+    return tbb::flow::continue_msg{};
+  });
+
+  tbb::flow::make_edge(q_in, n_proc);
+  tbb::flow::make_edge(n_proc, q_out);
+  tbb::flow::make_edge(q_out, n_tx);
+
+  // 送信スレッド（バッチ送信）
+  UdpSender sender("127.0.0.1", 50000);
+  std::thread tx_thread([&]{
+    std::vector<TxPacket> batch;
+    batch.reserve(64);
+    while (running.load(std::memory_order_relaxed)) {
+      batch.clear();
+
+      // 最低1件は待たずに試す（欲しければ blocking queue に変更）
+      ProcResult r;
+      while (q_out.try_get(r)) {
+        batch.push_back(TxPacket{ r.frame_id, r.payload.data(), r.payload.size() });
+        if (batch.size() >= 64) break;
+      }
+
+      if (!batch.empty()) {
+        sender.send_batch(batch);
+      } else {
+        std::this_thread::sleep_for(100us);
+      }
+    }
+  });
+
+  // 取得スレッド（止めない：SDK→自前コピー→q_in.try_put 失敗時は“最新優先”で古いのを落とす運用を推奨）
+  std::thread cap_thread([&]{
+    while (running.load(std::memory_order_relaxed)) {
+      PvBuffer* buf = nullptr;
+      PvResult opResult;
+      // Pipeline から受け取り（タイムアウトは環境に合わせて）
+      if (!ebus.pipeline->RetrieveBuffer(&buf, 1000, &opResult).IsOK() || buf == nullptr) {
+        continue;
+      }
+      if (opResult.IsOK() && buf->GetPayloadType() == PvPayloadTypeImage) {
+        auto* img = buf->GetImage();
+        const int w = img->GetWidth();
+        const int h = img->GetHeight();
+        const int bpp = img->GetBitsPerPixel();       // 8/10/12/16 など
+        const int stride = (int)img->GetStride();
+        const size_t bytes = (size_t)stride * h;
+
+        HostFrame f;
+        f.frame_id = frame_counter++;
+        f.width = w; f.height = h; f.stride = stride;
+        f.data.resize(bytes);
+
+        // SDK バッファ → 自前メモリへコピー（Attach を使う場合は“長保有しない”こと）
+        std::memcpy(f.data.data(), img->GetDataPointer(), bytes);
+
+        // queue_node に投入（満杯制御：ここでは “無限” なので注意）
+        // もし溢れ制御したいなら limiter_node を使うか、try_put 失敗時に古い要素を捨てる buffer_node を自前実装
+        q_in.try_put(std::move(f));
+      }
+      // Release
+      ebus.pipeline->ReleaseBuffer(buf);
+    }
+  });
+
+  // デモ: 数秒走らせて終了（実運用は適切なシャットダウン条件へ）
+  std::this_thread::sleep_for(5s);
+  running.store(false);
+
+  cap_thread.join();
+  tx_thread.join();
+
+  // グラフの残務なし
+  g.wait_for_all();
+
+  ebus.close();
+  std::cout << "done.\n";
+  return 0;
+}
