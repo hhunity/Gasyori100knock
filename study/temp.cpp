@@ -1,3 +1,45 @@
+#include <ftxui/component/screen_interactive.hpp>
+#include <ftxui/component/component.hpp>
+#include <ftxui/dom/elements.hpp>
+#include <iostream>
+using namespace ftxui;
+
+int main() {
+    auto screen = ScreenInteractive::TerminalOutput();
+
+    std::vector<std::string> menu_entries = {
+        "1. カメラ取込み開始",
+        "2. 画像処理テスト",
+        "3. 送信テスト",
+        "4. 終了"
+    };
+    int selected = 0;
+
+    auto menu = Menu(&menu_entries, &selected);
+    menu |= CatchEvent([&](Event event) {
+        if (event == Event::Return) {
+            if (selected == 0) {
+                std::cout << "カメラ取込みを実行します...\n";
+                std::this_thread::sleep_for(std::chrono::seconds(1));
+            } else if (selected == 1) {
+                std::cout << "画像処理テストを実行します...\n";
+                std::this_thread::sleep_for(std::chrono::seconds(1));
+            } else if (selected == 2) {
+                std::cout << "送信テストを実行します...\n";
+                std::this_thread::sleep_for(std::chrono::seconds(1));
+            } else if (selected == 3) {
+                screen.Exit();
+            }
+            return true; // イベント処理済み
+        }
+        return false;
+    });
+
+    screen.Loop(menu);
+    return 0;
+}
+
+
 #include <opencv2/opencv.hpp>
 #include <cmath>
 
