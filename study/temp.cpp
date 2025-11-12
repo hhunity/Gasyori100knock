@@ -1,5 +1,41 @@
 #include <tiffio.h>
 #include <cstdint>
+#include <stdexcept>
+
+void write_tiff_gray8(const char* path,
+                      uint32_t w, uint32_t h,
+                      const uint8_t* data,     // 1px=1byte、行ピッチ=stride
+                      uint32_t stride_bytes,   // 例: stride_bytes = w
+                      int use_lzw = 1)         // 0:無圧縮, 1:LZW
+{
+    TIFF* tif = TIFFOpen(path, "w");
+    if (!tif) throw std::runtime_error("TIFFOpen failed");
+
+    TIFFSetField(tif, TIFFTAG_IMAGEWIDTH, w);
+    TIFFSetField(tif, TIFFTAG_IMAGELENGTH, h);
+    TIFFSetField(tif, TIFFTAG_BITSPERSAMPLE, 8);
+    TIFFSetField(tif, TIFFTAG_SAMPLESPERPIXEL, 1);
+    TIFFSetField(tif, TIFFTAG_PHOTOMETRIC, PHOTOMETRIC_MINISBLACK);
+    TIFFSetField(tif, TIFFTAG_PLANARCONFIG, PLANARCONFIG_CONTIG);
+    TIFFSetField(tif, TIFFTAG_COMPRESSION, use_lzw ? COMPRESSION_LZW : COMPRESSION_NONE);
+
+    // ストリップサイズ（適当でOK：1〜数十行）。小さめにするとメモリ少なめ。
+    TIFFSetField(tif, TIFFTAG_ROWSPERSTRIP, TIFFDefaultStripSize(tif, w));
+
+    for (uint32_t y = 0; y < h; ++y) {
+        const tdata_t row = (tdata_t)(data + (size_t)y * stride_bytes);
+        if (TIFFWriteScanline(tif, row, y, 0) < 0)
+            throw std::runtime_error("TIFFWriteScanline failed");
+    }
+
+    // お好みでメタデータ
+    TIFFSetField(tif, TIFFTAG_SOFTWARE, "YourApp 1.0");
+    TIFFClose(tif);
+}
+
+
+#include <tiffio.h>
+#include <cstdint>
 #include <cstdlib>
 #include <iostream>
 
