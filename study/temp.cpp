@@ -1,3 +1,115 @@
+#include <tiffio.h>
+#include <cstdint>
+#include <cstdlib>
+#include <iostream>
+
+uint8_t* read_tiff_gray8(const char* filename,
+                         uint32_t& width,
+                         uint32_t& height)
+{
+    TIFF* tif = TIFFOpen(filename, "r");
+    if (!tif) {
+        std::cerr << "Cannot open file\n";
+        return nullptr;
+    }
+
+    uint16_t bitsPerSample = 0, samplesPerPixel = 0;
+    TIFFGetField(tif, TIFFTAG_IMAGEWIDTH, &width);
+    TIFFGetField(tif, TIFFTAG_IMAGELENGTH, &height);
+    TIFFGetField(tif, TIFFTAG_BITSPERSAMPLE, &bitsPerSample);
+    TIFFGetField(tif, TIFFTAG_SAMPLESPERPIXEL, &samplesPerPixel);
+
+    if (bitsPerSample != 8 || samplesPerPixel != 1) {
+        std::cerr << "Only 8bit grayscale supported\n";
+        TIFFClose(tif);
+        return nullptr;
+    }
+
+    // ★ ここで自前のメモリを確保
+    uint8_t* buf = static_cast<uint8_t*>(std::malloc(width * height));
+    if (!buf) {
+        TIFFClose(tif);
+        return nullptr;
+    }
+
+    for (uint32_t y = 0; y < height; ++y) {
+        uint8_t* row = buf + y * width;
+        if (TIFFReadScanline(tif, row, y, 0) < 0) {
+            std::cerr << "Failed to read scanline " << y << "\n";
+            std::free(buf);
+            TIFFClose(tif);
+            return nullptr;
+        }
+    }
+
+    TIFFClose(tif);
+    return buf;  // ← 呼び出し側で free() する
+}
+
+int main() {
+    uint32_t w, h;
+    uint8_t* data = read_tiff_gray8("gray8.tif", w, h);
+    if (data) {
+        std::cout << "read ok: " << w << "x" << h
+                  << " first=" << (int)data[0] << "\n";
+        std::free(data);
+    }
+}
+
+#include <tiffio.h>
+#include <cstdint>
+#include <cstdlib>
+#include <iostream>
+
+uint8_t* read_tiff_gray2(const char* filename,
+                         uint32_t& w,
+                         uint32_t& h)
+{
+    TIFF* tif = TIFFOpen(filename, "r");
+    if (!tif) return nullptr;
+
+    uint16_t bitsPerSample = 0, samplesPerPixel = 0;
+    TIFFGetField(tif, TIFFTAG_IMAGEWIDTH, &w);
+    TIFFGetField(tif, TIFFTAG_IMAGELENGTH, &h);
+    TIFFGetField(tif, TIFFTAG_BITSPERSAMPLE, &bitsPerSample);
+    TIFFGetField(tif, TIFFTAG_SAMPLESPERPIXEL, &samplesPerPixel);
+
+    if (bitsPerSample != 2 || samplesPerPixel != 1) {
+        std::cerr << "Not 2-bit grayscale\n";
+        TIFFClose(tif);
+        return nullptr;
+    }
+
+    const uint32_t packed_stride = (w + 3) / 4;
+    std::vector<uint8_t> packed(packed_stride * h);
+    for (uint32_t y = 0; y < h; ++y)
+        TIFFReadScanline(tif, packed.data() + y * packed_stride, y, 0);
+    TIFFClose(tif);
+
+    // ★ 展開先メモリを確保（8bit化したいので1pix=1byte）
+    uint8_t* out = static_cast<uint8_t*>(std::malloc(w * h));
+    for (uint32_t y = 0; y < h; ++y) {
+        for (uint32_t x = 0; x < w; ++x) {
+            const uint8_t byte = packed[y * packed_stride + x / 4];
+            const uint8_t shift = 6 - 2 * (x % 4);
+            uint8_t v2 = (byte >> shift) & 0x3; // 0〜3
+            out[y * w + x] = (v2 * 255) / 3;    // 0〜255に拡張
+        }
+    }
+    return out;
+}
+
+int main() {
+    uint32_t w, h;
+    uint8_t* img = read_tiff_gray2("gray2.tif", w, h);
+    if (img) {
+        std::cout << "size=" << w << "x" << h << " first=" << (int)img[0] << "\n";
+        std::free(img);
+    }
+}
+
+
+
 
 #include <ftxui/component/screen_interactive.hpp>
 #include <ftxui/component/component.hpp>
