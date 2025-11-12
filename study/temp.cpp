@@ -1,3 +1,37 @@
+
+#include <nlohmann/json.hpp>
+#include <fstream>
+#include <iostream>
+using nlohmann::json;
+
+struct CameraConfig {
+    int width;
+    int height;
+    double exposure;
+    bool enable;
+};
+
+// ← 既存構造体に「変換ルール」を追加するだけ
+inline void from_json(const json& j, CameraConfig& c) {
+    j.at("width").get_to(c.width);
+    j.at("height").get_to(c.height);
+    j.at("exposure").get_to(c.exposure);
+    j.at("enable").get_to(c.enable);
+}
+
+int main() {
+    std::ifstream ifs("config.json");
+    json j; ifs >> j;
+
+    CameraConfig cfg = j.get<CameraConfig>(); // ← 一発で詰め替え！
+
+    std::cout << "width=" << cfg.width << " height=" << cfg.height
+              << " exposure=" << cfg.exposure
+              << " enable=" << cfg.enable << std::endl;
+}
+
+
+
 #include <tiffio.h>
 #include <cstdint>
 #include <stdexcept>
