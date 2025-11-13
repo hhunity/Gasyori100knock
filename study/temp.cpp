@@ -1,4 +1,189 @@
 
+#pragma once
+#include <cstdint>
+#include <cstddef>
+#include <cstring>
+#include <stdexcept>
+
+class Frame
+{
+public:
+    using value_type = std::uint8_t;
+
+    Frame() = default;
+
+    Frame(int width, int height, int channels)
+    {
+        create(width, height, channels);
+    }
+
+    // コピーコンストラクタ（参照カウントを増やす）
+    Frame(const Frame& other) noexcept
+        : data_(other.data_)
+        , width_(other.width_)
+        , height_(other.height_)
+        , channels_(other.channels_)
+        , stride_(other.stride_)
+        , refCount_(other.refCount_)
+    {
+        incRef();
+    }
+
+    // ムーブコンストラクタ（ポインタごと移動）
+    Frame(Frame&& other) noexcept
+        : data_(other.data_)
+        , width_(other.width_)
+        , height_(other.height_)
+        , channels_(other.channels_)
+        , stride_(other.stride_)
+        , refCount_(other.refCount_)
+    {
+        other.data_ = nullptr;
+        other.refCount_ = nullptr;
+        other.width_ = other.height_ = other.channels_ = 0;
+        other.stride_ = 0;
+    }
+
+    // コピー代入
+    Frame& operator=(const Frame& other) noexcept
+    {
+        if (this == &other)
+            return *this;
+
+        releaseInternal(); // いま持っているものを手放す
+
+        data_      = other.data_;
+        width_     = other.width_;
+        height_    = other.height_;
+        channels_  = other.channels_;
+        stride_    = other.stride_;
+        refCount_  = other.refCount_;
+        incRef();
+        return *this;
+    }
+
+    // ムーブ代入
+    Frame& operator=(Frame&& other) noexcept
+    {
+        if (this == &other)
+            return *this;
+
+        releaseInternal();
+
+        data_      = other.data_;
+        width_     = other.width_;
+        height_    = other.height_;
+        channels_  = other.channels_;
+        stride_    = other.stride_;
+        refCount_  = other.refCount_;
+
+        other.data_ = nullptr;
+        other.refCount_ = nullptr;
+        other.width_ = other.height_ = other.channels_ = 0;
+        other.stride_ = 0;
+
+        return *this;
+    }
+
+    ~Frame()
+    {
+        releaseInternal();
+    }
+
+    // 新しくバッファを確保（既存の共有は切れる）
+    void create(int width, int height, int channels)
+    {
+        if (width <= 0 || height <= 0 || channels <= 0)
+            throw std::invalid_argument("Frame::create: invalid size");
+
+        // いま持っているものを解放（参照カウンタ付き）
+        releaseInternal();
+
+        width_    = width;
+        height_   = height;
+        channels_ = channels;
+        stride_   = static_cast<std::size_t>(width_) * channels_;
+
+        std::size_t bytes = stride_ * height_;
+        data_ = new value_type[bytes];
+
+        try {
+            refCount_ = new int(1);
+        } catch (...) {
+            delete[] data_;
+            data_ = nullptr;
+            throw;
+        }
+    }
+
+    // 完全に手放す（このオブジェクトを empty にする）
+    void release()
+    {
+        releaseInternal();
+        width_ = height_ = channels_ = 0;
+        stride_ = 0;
+    }
+
+    bool empty() const noexcept { return data_ == nullptr || width_ == 0 || height_ == 0; }
+
+    int width() const noexcept { return width_; }
+    int height() const noexcept { return height_; }
+    int channels() const noexcept { return channels_; }
+    std::size_t stride() const noexcept { return stride_; }
+
+    value_type* data() noexcept { return data_; }
+    const value_type* data() const noexcept { return data_; }
+
+    value_type* ptr(int y) noexcept
+    {
+        return data_ + stride_ * static_cast<std::size_t>(y);
+    }
+
+    const value_type* ptr(int y) const noexcept
+    {
+        return data_ + stride_ * static_cast<std::size_t>(y);
+    }
+
+    // ディープコピー（cv::Mat::clone() 相当）
+    Frame clone() const
+    {
+        Frame dst;
+        if (empty())
+            return dst;
+
+        dst.create(width_, height_, channels_);
+        std::memcpy(dst.data_, data_, stride_ * height_);
+        return dst;
+    }
+
+private:
+    value_type* data_   = nullptr;
+    int width_          = 0;
+    int height_         = 0;
+    int channels_       = 0;
+    std::size_t stride_ = 0;
+    int* refCount_      = nullptr;    // 共有の参照カウンタ
+
+    void incRef() noexcept
+    {
+        if (refCount_)
+            ++(*refCount_);
+    }
+
+    void releaseInternal() noexcept
+    {
+        if (refCount_) {
+            if (--(*refCount_) == 0) {
+                delete[] data_;
+                delete refCount_;
+            }
+            refCount_ = nullptr;
+            data_ = nullptr;
+        }
+    }
+};
+
+
 #include <nlohmann/json.hpp>
 #include <fstream>
 #include <iostream>
