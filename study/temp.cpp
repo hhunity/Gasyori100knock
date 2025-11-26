@@ -1,3 +1,30 @@
+binaryDir
+jobs
+Windows",
+      "condition": {
+        "type": "equals",
+        "lhs": "${hostSystemName}",
+        "rhs": "Windows"
+      }
+
+cmake --build build
+cmake --build build --target install
+
+{
+  "workflowPresets": [
+    {
+      "name": "run-app",
+      "steps": [
+        {
+          "type": "launch",
+          "target": "MyApp"
+        }
+      ]
+    }
+  ]
+}
+
+
 
 {
   "configurePresets": [
