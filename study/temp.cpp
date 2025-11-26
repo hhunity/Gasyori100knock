@@ -1,4 +1,9 @@
 
+"cacheVariables": {
+    "CMAKE_TOOLCHAIN_FILE": "vcpkg/scripts/buildsystems/vcpkg.cmake",
+    "VCPKG_TARGET_TRIPLET": "x64-windows"
+}
+
 #pragma once
 #include <cstdint>
 #include <cstddef>
