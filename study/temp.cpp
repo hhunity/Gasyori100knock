@@ -1,3 +1,20 @@
+# Debug ビルド時の成果物をコピー
+install(
+    DIRECTORY ${CMAKE_BINARY_DIR}/Debug/
+    DESTINATION bin
+    CONFIGURATIONS Debug
+    FILES_MATCHING PATTERN "*.dll" PATTERN "*.exe"
+)
+
+# Release ビルド時の成果物をコピー
+install(
+    DIRECTORY ${CMAKE_BINARY_DIR}/Release/
+    DESTINATION bin
+    CONFIGURATIONS Release
+    FILES_MATCHING PATTERN "*.dll" PATTERN "*.exe"
+)
+
+
 binaryDir
 jobs
 Windows",
