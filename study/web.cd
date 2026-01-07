@@ -3,6 +3,133 @@ using System.Text.Json;
 using NetMQ;
 using NetMQ.Sockets;
 
+public sealed class ZmqJsonDocSubscriber : IDisposable
+{
+    private readonly SubscriberSocket _sub;
+    private readonly NetMQPoller _poller;
+
+    // (topic, jsonDocument, rawJson)
+    // 注意: JsonDocument は IDisposable。ハンドラ側で Dispose してください（下に例あり）。
+    public event Action<string?, JsonDocument, string>? MessageReceived;
+
+    public event Action<string?, string, Exception>? ParseError; // (topic, rawJson, ex)
+
+    public ZmqJsonDocSubscriber(string endpoint, string? topic = null)
+    {
+        AsyncIO.ForceDotNet.Force();
+
+        _sub = new SubscriberSocket();
+        _sub.Connect(endpoint);
+
+        if (string.IsNullOrEmpty(topic))
+            _sub.SubscribeToAnyTopic();
+        else
+            _sub.Subscribe(topic);
+
+        _sub.ReceiveReady += (_, __) => OnReceive();
+        _poller = new NetMQPoller { _sub };
+    }
+
+    public void Start() => _poller.RunAsync();
+
+    public void Stop()
+    {
+        if (_poller.IsRunning) _poller.Stop();
+    }
+
+    private void OnReceive()
+    {
+        // multipart(topic + json) / single(json) の両対応
+        string? topic = null;
+        string rawJson;
+
+        var msg = _sub.ReceiveMultipartMessage();
+
+        if (msg.FrameCount == 1)
+        {
+            rawJson = msg[0].ConvertToString();
+        }
+        else
+        {
+            topic = msg[0].ConvertToString();
+            rawJson = msg[1].ConvertToString();
+        }
+
+        try
+        {
+            var doc = JsonDocument.Parse(rawJson);
+            MessageReceived?.Invoke(topic, doc, rawJson);
+            // doc.Dispose() は購読側（イベントハンドラ側）で実行してください
+        }
+        catch (Exception ex) when (ex is JsonException or ArgumentException)
+        {
+            ParseError?.Invoke(topic, rawJson, ex);
+        }
+    }
+
+    public void Dispose()
+    {
+        Stop();
+        _sub.Dispose();
+        _poller.Dispose();
+        NetMQConfig.Cleanup();
+    }
+}
+
+// ------------------------
+// 使い方例
+// ------------------------
+public static class Example
+{
+    public static void Run()
+    {
+        var sub = new ZmqJsonDocSubscriber("tcp://127.0.0.1:5556", topic: "status");
+
+        sub.MessageReceived += (topic, doc, raw) =>
+        {
+            try
+            {
+                var root = doc.RootElement;
+
+                // 例: {"ts":"...","value":123.4,"status":"ok"}
+                if (root.TryGetProperty("value", out var v) && v.TryGetDouble(out var value))
+                {
+                    Console.WriteLine($"topic={topic ?? "(none)"} value={value}");
+                }
+
+                if (root.TryGetProperty("status", out var s) && s.ValueKind == JsonValueKind.String)
+                {
+                    Console.WriteLine($"status={s.GetString()}");
+                }
+            }
+            finally
+            {
+                // 重要: JsonDocument は Dispose する
+                doc.Dispose();
+            }
+        };
+
+        sub.ParseError += (topic, raw, ex) =>
+        {
+            Console.WriteLine($"JSON parse error topic={topic ?? "(none)"}: {ex.Message}");
+            Console.WriteLine(raw);
+        };
+
+        sub.Start();
+
+        Console.WriteLine("SUB running. Press Enter to exit.");
+        Console.ReadLine();
+
+        sub.Dispose();
+    }
+}
+
+
+using System;
+using System.Text.Json;
+using NetMQ;
+using NetMQ.Sockets;
+
 public sealed class ZmqJsonSubscriber<T> : IDisposable
 {
     private readonly SubscriberSocket _sub;
