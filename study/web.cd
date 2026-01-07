@@ -1,3 +1,105 @@
+
+(() => {
+  const analysisEl = document.getElementById("analysis");
+  const canvas = document.getElementById("chart");
+  if (!analysisEl || !canvas) return;
+
+  const ctx = canvas.getContext("2d");
+
+  function toPoints(xs, ys) {
+    if (!Array.isArray(xs) || !Array.isArray(ys)) return [];
+    const n = Math.min(xs.length, ys.length);
+    const pts = [];
+    for (let i = 0; i < n; i++) {
+      const x = xs[i], y = ys[i];
+      if (typeof x === "number" && typeof y === "number" && Number.isFinite(x) && Number.isFinite(y)) {
+        pts.push({ x, y });
+      }
+    }
+    return pts;
+  }
+
+  // まず1回だけチャートを作る
+  const chart = new Chart(ctx, {
+    type: "scatter",
+    data: {
+      datasets: [
+        {
+          label: "Left (y)",
+          yAxisID: "y",
+          data: [],
+          pointRadius: 2,
+          showLine: false
+        },
+        {
+          label: "Right (y1)",
+          yAxisID: "y1",
+          data: [],
+          pointRadius: 2,
+          showLine: false
+        }
+      ]
+    },
+    options: {
+      responsive: true,
+      maintainAspectRatio: false,
+      parsing: false,
+      animation: false,
+      plugins: {
+        title: { display: true, text: "Scatter" },
+        legend: { display: true }
+      },
+      scales: {
+        x: { type: "linear", title: { display: true, text: "ts" } },
+        y: {
+          type: "linear",
+          position: "left",
+          title: { display: true, text: "left value" }
+        },
+        y1: {
+          type: "linear",
+          position: "right",
+          title: { display: true, text: "right value" },
+          grid: { drawOnChartArea: false } // 右軸のグリッドは消すと見やすい
+        }
+      }
+    }
+  });
+
+  const es = new EventSource("/events");
+  es.onmessage = (ev) => {
+    let obj;
+    try { obj = JSON.parse(ev.data); } catch { return; }
+
+    const leftPts  = toPoints(obj.left?.ts,  obj.left?.value);
+    const rightPts = toPoints(obj.right?.ts, obj.right?.value);
+
+    // タイトル（JSONにあればそれを使う）
+    const title = (typeof obj.title === "string" && obj.title.length)
+      ? obj.title
+      : `Left N=${leftPts.length}, Right N=${rightPts.length}`;
+
+    chart.options.plugins.title.text = title;
+
+    // 解析情報（JSON側で作って渡すならそれを表示、なければ簡易）
+    if (obj.analysis && typeof obj.analysis === "object") {
+      analysisEl.textContent = JSON.stringify(obj.analysis, null, 2);
+    } else {
+      analysisEl.textContent = `Left N=${leftPts.length}\nRight N=${rightPts.length}`;
+    }
+
+    // データ差し替え
+    chart.data.datasets[0].data = leftPts;   // y
+    chart.data.datasets[1].data = rightPts;  // y1
+
+    chart.update("none");
+  };
+
+  es.onerror = () => {
+    analysisEl.textContent = "SSE disconnected (will retry automatically).";
+  };
+})();
+
 <!doctype html>
 <html lang="ja">
 <head>
