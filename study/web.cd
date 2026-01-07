@@ -1,4 +1,3 @@
-
 <!doctype html>
 <html lang="ja">
 <head>
@@ -6,954 +5,150 @@
   <title>Scatter Viewer</title>
   <style>
     body { font-family: sans-serif; margin: 16px; }
-    #analysis {
-      margin: 10px 0;
-      padding: 10px 12px;
+
+    .row {
+      display: grid;
+      grid-template-columns: 1fr 1fr;  /* 左右2カラム */
+      gap: 16px;
+      align-items: start;
+    }
+
+    .panel {
+      border: 1px solid #ddd;
+      padding: 12px;
+      background: #fff;
+    }
+
+    .analysis {
+      margin: 0 0 10px 0;
+      padding: 8px 10px;
       background: #f5f5f5;
       white-space: pre-wrap;
       border: 1px solid #ddd;
+      min-height: 90px;
     }
-    canvas { background: #fff; border: 1px solid #ddd; }
+
+    canvas { width: 100%; height: 420px; border: 1px solid #ddd; }
   </style>
 
-  <!-- Chart.js -->
-  <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
+  <!-- ローカル配信にしている想定 -->
+  <script src="{{ url_for('static', filename='vendor/chart.umd.min.js') }}"></script>
+  <script src="{{ url_for('static', filename='app.js') }}?v={{ cache_bust }}"></script>
 </head>
 <body>
-  <h2>Scatter Plot</h2>
-
-  <div id="analysis">waiting...</div>
-
-  <canvas id="chart" width="900" height="420"></canvas>
-
-  <script>
-    const analysisEl = document.getElementById("analysis");
-    const ctx = document.getElementById("chart").getContext("2d");
-
-    let chart = null;
-    let seq = 0;
-
-    function toPoints(xs, ys) {
-      const n = Math.min(xs.length, ys.length);
-      const pts = [];
-      for (let i = 0; i < n; i++) {
-        const x = xs[i], y = ys[i];
-        if (typeof x === "number" && typeof y === "number" && Number.isFinite(x) && Number.isFinite(y)) {
-          pts.push({ x, y });
-        }
-      }
-      return pts;
-    }
-
-    // 解析情報（必要最低限 + 回帰/相関）
-    function analyze(points) {
-      const n = points.length;
-      if (n === 0) return { n: 0 };
-
-      let minX = points[0].x, maxX = points[0].x;
-      let minY = points[0].y, maxY = points[0].y;
-      let sumX = 0, sumY = 0;
-
-      for (const p of points) {
-        if (p.x < minX) minX = p.x;
-        if (p.x > maxX) maxX = p.x;
-        if (p.y < minY) minY = p.y;
-        if (p.y > maxY) maxY = p.y;
-        sumX += p.x;
-        sumY += p.y;
-      }
-
-      const meanX = sumX / n;
-      const meanY = sumY / n;
-
-      let sxx = 0, syy = 0, sxy = 0;
-      for (const p of points) {
-        const dx = p.x - meanX;
-        const dy = p.y - meanY;
-        sxx += dx * dx;
-        syy += dy * dy;
-        sxy += dx * dy;
-      }
-
-      // 標準偏差（不偏ではなく母標準偏差に近い形：用途に応じて変更可）
-      const stdX = Math.sqrt(sxx / n);
-      const stdY = Math.sqrt(syy / n);
-
-      // 相関係数（0割り防止）
-      const corr = (sxx > 0 && syy > 0) ? (sxy / Math.sqrt(sxx * syy)) : null;
-
-      // 単回帰 y = a*x + b
-      const slope = (sxx > 0) ? (sxy / sxx) : null;
-      const intercept = (slope != null) ? (meanY - slope * meanX) : null;
-
-      return {
-        n, minX, maxX, minY, maxY, meanX, meanY, stdX, stdY, corr, slope, intercept
-      };
-    }
-
-    function formatAnalysis(a) {
-      if (!a || a.n === 0) return "No valid points.";
-
-      const lines = [];
-      lines.push(`N = ${a.n}`);
-      lines.push(`X: min=${a.minX}, max=${a.maxX}, mean=${a.meanX.toFixed(6)}, std=${a.stdX.toFixed(6)}`);
-      lines.push(`Y: min=${a.minY}, max=${a.maxY}, mean=${a.meanY.toFixed(6)}, std=${a.stdY.toFixed(6)}`);
-
-      if (a.corr != null) lines.push(`corr(x,y) = ${a.corr.toFixed(6)}`);
-      if (a.slope != null && a.intercept != null) {
-        lines.push(`fit: y = ${a.slope.toFixed(6)} * x + ${a.intercept.toFixed(6)}`);
-      }
-      return lines.join("\n");
-    }
-
-    // 毎回「初期化」＝destroyしてnew Chart
-    function renderNewChart(points, titleText) {
-      if (chart) {
-        chart.destroy();
-        chart = null;
-      }
-
-      chart = new Chart(ctx, {
-        type: "scatter",
-        data: {
-          datasets: [{
-            label: "points",
-            data: points,
-            pointRadius: 2,
-            showLine: false
-          }]
-        },
-        options: {
-          animation: false,
-          responsive: true,
-          parsing: false,
-          plugins: {
-            title: {
-              display: true,
-              text: titleText
-            }
-          },
-          scales: {
-            x: { type: "linear", title: { display: true, text: "ts" } },
-            y: { type: "linear", title: { display: true, text: "value" } }
-          }
-        }
-      });
-    }
-
-    // SSE受信
-    const es = new EventSource("/events");
-    es.onmessage = (ev) => {
-      let obj;
-      try { obj = JSON.parse(ev.data); } catch { return; }
-
-      // 想定：両方数値配列 {"ts":[...], "value":[...]}
-      if (!Array.isArray(obj.ts) || !Array.isArray(obj.value)) return;
-
-      const points = toPoints(obj.ts, obj.value);
-      const a = analyze(points);
-
-      seq += 1;
-
-      // タイトル（例）：任意で obj.title 等があれば優先してもOK
-      const title = `Scatter Plot #${seq} (N=${a.n ?? 0})`;
-
-      // 解析情報はHTMLに表示（不要なら消してよい）
-      analysisEl.textContent = formatAnalysis(a);
-
-      // グラフは毎回初期化して描画
-      renderNewChart(points, title);
-    };
-
-    es.onerror = () => {
-      analysisEl.textContent = "SSE disconnected (will retry automatically).";
-    };
-  </script>
-</body>
-</html>
-
-es.onmessage = (ev) => {
-  let obj;
-  try { obj = JSON.parse(ev.data); } catch { return; }
-
-  // タイトル（JSONに無ければ適当なデフォルト）
-  const title = (typeof obj.title === "string") ? obj.title : "Scatter Plot";
-
-  // 解析情報（JSONの analysis をそのまま表示）
-  if (obj.analysis && typeof obj.analysis === "object") {
-    analysisEl.textContent = JSON.stringify(obj.analysis, null, 2);
-  } else {
-    analysisEl.textContent = "";
-  }
-
-  // データ
-  if (!Array.isArray(obj.ts) || !Array.isArray(obj.value)) return;
-
-  const points = toPoints(obj.ts, obj.value);
-
-  // 毎回初期化して描画
-  renderNewChart(points, title);
-};
-
-<script>
-  const rawEl = document.getElementById("raw");
-  const infoEl = document.getElementById("info"); // ← 文字表示用（下のHTML参照）
-  const ctx = document.getElementById("chart").getContext("2d");
-
-  const points = [];
-
-  // グラフ上に文字を重ねる（任意）
-  const overlayTextPlugin = {
-    id: "overlayText",
-    afterDraw(chart, args, opts) {
-      if (!opts || !opts.text) return;
-      const { ctx, chartArea } = chart;
-      ctx.save();
-      ctx.font = "12px sans-serif";
-      ctx.fillText(opts.text, chartArea.left + 8, chartArea.top + 16);
-      ctx.restore();
-    }
-  };
-  Chart.register(overlayTextPlugin);
-
-  const chart = new Chart(ctx, {
-    type: "scatter",
-    data: {
-      datasets: [{
-        label: "value vs ts",
-        data: points,
-        pointRadius: 2,
-        showLine: false
-      }]
-    },
-    options: {
-      animation: false,
-      responsive: true,
-      parsing: false,
-      scales: {
-        x: { type: "linear", title: { display: true, text: "ts" } },
-        y: { type: "linear", title: { display: true, text: "value" } }
-      },
-      plugins: {
-        overlayText: { text: "" }   // ← canvas上の文字（任意）
-      }
-    }
-  });
-
-  function setPointsFromArrays(xs, ys) {
-    // “毎回初回から” = 受信ごとに全消去
-    points.length = 0;
-    const n = Math.min(xs.length, ys.length);
-    for (let i = 0; i < n; i++) {
-      const x = xs[i], y = ys[i];
-      if (typeof x === "number" && typeof y === "number") {
-        points.push({ x, y });
-      }
-    }
-    return points.length;
-  }
-
-  function updateText(lastX, lastY) {
-    // (A) HTML上に表示
-    if (infoEl) {
-      infoEl.textContent = `N=${points.length}` + (lastX != null ? `  last=(${lastX}, ${lastY})` : "");
-    }
-    // (B) グラフ上に重ね表示
-    chart.options.plugins.overlayText.text =
-      `N=${points.length}` + (lastX != null ? `  last=(${lastX}, ${lastY})` : "");
-  }
-
-  const es = new EventSource("/events");
-  es.onmessage = (ev) => {
-    rawEl.textContent = ev.data;
-
-    let obj;
-    try { obj = JSON.parse(ev.data); } catch { return; }
-
-    // バッチ形式: {"ts":[...], "value":[...]}
-    if (Array.isArray(obj.ts) && Array.isArray(obj.value)) {
-      const count = setPointsFromArrays(obj.ts, obj.value);
-
-      let lastX = null, lastY = null;
-      if (count > 0) {
-        lastX = points[count - 1].x;
-        lastY = points[count - 1].y;
-      }
-      updateText(lastX, lastY);
-
-      chart.update("none");
-      return;
-    }
-
-    // 1点形式: {"ts": 1.23, "value": 4.56}
-    if (typeof obj.ts === "number" && typeof obj.value === "number") {
-      points.length = 0;                 // ← 1点でも“初回から”なら全消去
-      points.push({ x: obj.ts, y: obj.value });
-      updateText(obj.ts, obj.value);
-      chart.update("none");
-    }
-  };
-</script>
-
-<script>
-  const rawEl = document.getElementById("raw");
-  const ctx = document.getElementById("chart").getContext("2d");
-
-  // 散布図は labels ではなく {x,y} の配列
-  const points = [];
-
-  const chart = new Chart(ctx, {
-    type: "scatter",
-    data: {
-      datasets: [{
-        label: "value vs ts",
-        data: points,
-        pointRadius: 2
-      }]
-    },
-    options: {
-      animation: false,
-      responsive: true,
-      parsing: false, // dataが {x,y} 形式なら明示しておくと少し軽い
-      scales: {
-        x: { type: "linear", title: { display: true, text: "ts" } },
-        y: { type: "linear", title: { display: true, text: "value" } }
-      }
-    }
-  });
-
-  const MAX_POINTS = 1000; // 表示点数の上限（必要に応じて）
-
-  function addPoint(x, y) {
-    if (typeof x !== "number" || typeof y !== "number") return;
-    points.push({ x, y });
-    if (points.length > MAX_POINTS) points.splice(0, points.length - MAX_POINTS);
-  }
-
-  // SSEでJSONを受け取って散布図更新
-  const es = new EventSource("/events");
-
-  es.onmessage = (ev) => {
-    rawEl.textContent = ev.data;
-
-    let obj;
-    try { obj = JSON.parse(ev.data); } catch { return; }
-
-    // バッチ: {"ts":[...], "value":[...]}
-    if (Array.isArray(obj.ts) && Array.isArray(obj.value) && obj.ts.length === obj.value.length) {
-      for (let i = 0; i < obj.ts.length; i++) {
-        addPoint(obj.ts[i], obj.value[i]);
-      }
-      chart.update("none");
-      return;
-    }
-
-    // 1点: {"ts": 1.23, "value": 4.56}
-    addPoint(obj.ts, obj.value);
-    chart.update("none");
-  };
-</script>
-
-es.onmessage = (ev) => {
-  let obj;
-  try { obj = JSON.parse(ev.data); } catch { return; }
-
-  // バッチ（配列）ならまとめて追加
-  if (Array.isArray(obj.ts) && Array.isArray(obj.value) && obj.ts.length === obj.value.length) {
-    for (let i = 0; i < obj.ts.length; i++) {
-      const v = obj.value[i];
-      if (typeof v === "number") {
-        labels.push(obj.ts[i]);
-        data.push(v);
-      }
-    }
-  }
-  // 1点形式なら従来通り
-  else {
-    const ts = (typeof obj.ts === "string") ? obj.ts : new Date().toISOString();
-    const v  = obj.value;
-    if (typeof v === "number") {
-      labels.push(ts);
-      data.push(v);
-    }
-  }
-
-  // 点数制限
-  while (labels.length > 500) { labels.shift(); data.shift(); }
-
-  // 更新は1回だけ
-  chart.update("none");
-};
-
-
-<!doctype html>
-<html lang="ja">
-<head>
-  <meta charset="utf-8" />
-  <title>Telemetry Viewer</title>
-  <style>
-    body { font-family: sans-serif; margin: 16px; }
-    .row { display: flex; gap: 16px; }
-    .panel { flex: 1; }
-    pre { background: #f5f5f5; padding: 12px; height: 180px; overflow: auto; }
-    canvas { background: #fff; border: 1px solid #ddd; }
-  </style>
-
-  <!-- Chart.js (CDN) -->
-  <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
-</head>
-<body>
-  <h2>Latest JSON</h2>
+  <h2>Two Charts</h2>
 
   <div class="row">
     <div class="panel">
-      <pre id="raw">{}</pre>
+      <div id="analysis1" class="analysis">waiting...</div>
+      <canvas id="chart1"></canvas>
     </div>
+
     <div class="panel">
-      <canvas id="chart" width="900" height="420"></canvas>
+      <div id="analysis2" class="analysis">waiting...</div>
+      <canvas id="chart2"></canvas>
     </div>
   </div>
+</body>
+</html>
 
-  <script>
-    const rawEl = document.getElementById("raw");
-    const ctx = document.getElementById("chart").getContext("2d");
+(() => {
+  const analysis1 = document.getElementById("analysis1");
+  const analysis2 = document.getElementById("analysis2");
+  const c1 = document.getElementById("chart1");
+  const c2 = document.getElementById("chart2");
+  if (!analysis1 || !analysis2 || !c1 || !c2) return;
 
-    const labels = [];
-    const data = [];
+  const ctx1 = c1.getContext("2d");
+  const ctx2 = c2.getContext("2d");
 
-    const chart = new Chart(ctx, {
-      type: "line",
+  let chart1 = null;
+  let chart2 = null;
+
+  function toPoints(xs, ys) {
+    if (!Array.isArray(xs) || !Array.isArray(ys)) return [];
+    const n = Math.min(xs.length, ys.length);
+    const pts = [];
+    for (let i = 0; i < n; i++) {
+      const x = xs[i], y = ys[i];
+      if (typeof x === "number" && typeof y === "number" && Number.isFinite(x) && Number.isFinite(y)) {
+        pts.push({ x, y });
+      }
+    }
+    return pts;
+  }
+
+  function formatAnalysisFromObject(obj) {
+    // analysis を JSON 文字列で表示（任意）
+    if (obj && typeof obj === "object") return JSON.stringify(obj, null, 2);
+    return "";
+  }
+
+  function renderScatter(ctx, points, titleText, existingChart) {
+    if (existingChart) existingChart.destroy();
+
+    return new Chart(ctx, {
+      type: "scatter",
       data: {
-        labels,
         datasets: [{
-          label: "value",
-          data,
-          tension: 0.15,
-          pointRadius: 0
+          label: "points",
+          data: points,
+          pointRadius: 2,
+          showLine: false
         }]
       },
       options: {
         animation: false,
         responsive: true,
+        parsing: false,
+        plugins: {
+          title: { display: true, text: titleText ?? "" }
+        },
         scales: {
-          x: { title: { display: true, text: "ts" } },
-          y: { title: { display: true, text: "value" } }
+          x: { type: "linear", title: { display: true, text: "ts" } },
+          y: { type: "linear", title: { display: true, text: "value" } }
         }
       }
     });
+  }
 
-    // SSEでJSONを受け取ってグラフ更新
-    const es = new EventSource("/events");
-
-    es.onmessage = (ev) => {
-      rawEl.textContent = ev.data;
-
-      let obj;
-      try { obj = JSON.parse(ev.data); } catch { return; }
-
-      // 想定: {"ts":"...","value":123.4}
-      const ts = (typeof obj.ts === "string") ? obj.ts : new Date().toISOString();
-      const v  = obj.value;
-
-      if (typeof v === "number") {
-        labels.push(ts);
-        data.push(v);
-
-        // 点数制限（例：直近500点）
-        if (labels.length > 500) {
-          labels.shift();
-          data.shift();
-        }
-
-        chart.update("none"); // 軽量更新
-      }
-    };
-
-    es.onerror = () => {
-      // ネットワーク/サーバ停止時など。必要なら表示や再接続ロジックを追加
-      // EventSourceは通常自動で再接続します
-    };
-  </script>
-</body>
-</html>
-
-import json
-import time
-import queue
-import threading
-from typing import List, Optional
-
-import zmq
-from flask import Flask, Response
-
-app = Flask(__name__)
-
-# 最新データ（受信したJSONを保持）
-_latest_raw: str = "{}"
-_latest_lock = threading.Lock()
-
-# SSEクライアントごとのキュー
-_clients: List["queue.Queue[str]"] = []
-_clients_lock = threading.Lock()
-
-ZMQ_ENDPOINT = "tcp://127.0.0.1:18081"
-ZMQ_TOPIC = "telemetry"  # 送信側がtopicを付ける場合（multipart）
-
-def broadcast(raw_json: str) -> None:
-    # 全クライアントにpush（溜まりすぎるクライアントは捨てる）
-    with _clients_lock:
-        dead = []
-        for q in _clients:
-            try:
-                q.put_nowait(raw_json)
-            except queue.Full:
-                # 詰まっているクライアントは最新追従できないので古いのを捨てる
-                try:
-                    _ = q.get_nowait()
-                except queue.Empty:
-                    pass
-                try:
-                    q.put_nowait(raw_json)
-                except queue.Full:
-                    dead.append(q)
-        for q in dead:
-            _clients.remove(q)
-
-def zmq_subscriber_thread() -> None:
-    global _latest_raw
-
-    ctx = zmq.Context.instance()
-    sub = ctx.socket(zmq.SUB)
-    sub.connect(ZMQ_ENDPOINT)
-
-    # topic+payload の multipart を想定するなら topic 購読
-    sub.setsockopt_string(zmq.SUBSCRIBE, ZMQ_TOPIC)
-
-    while True:
-        try:
-            parts = sub.recv_multipart()
-            if len(parts) == 1:
-                raw = parts[0].decode("utf-8", errors="replace")
-            else:
-                # [topic, payload]
-                raw = parts[1].decode("utf-8", errors="replace")
-
-            # JSONとして最低限妥当かチェック（壊れてたら無視）
-            json.loads(raw)
-
-            with _latest_lock:
-                _latest_raw = raw
-
-            broadcast(raw)
-        except Exception:
-            # 運用ではログ推奨
-            time.sleep(0.05)
-
-@app.get("/events")
-def sse_events():
-    q: "queue.Queue[str]" = queue.Queue(maxsize=5)
-
-    with _clients_lock:
-        _clients.append(q)
-
-    def gen():
-        try:
-            # 接続直後に最新を1回送る
-            with _latest_lock:
-                first = _latest_raw
-            yield f"data: {first}\n\n"
-
-            while True:
-                raw = q.get()
-                yield f"data: {raw}\n\n"
-        finally:
-            with _clients_lock:
-                if q in _clients:
-                    _clients.remove(q)
-
-    return Response(gen(), mimetype="text/event-stream")
-
-@app.get("/")
-def index():
-    # 依存を増やさず、ブラウザ側でJSONを表示＋簡易グラフ（Plotly CDN利用）
-    # 会社ポリシーでCDN禁止なら、ここは自前で静的配布に切り替えます。
-    return """
-<!doctype html>
-<html>
-<head>
-  <meta charset="utf-8" />
-  <title>Telemetry</title>
-  <style>
-    body { font-family: sans-serif; margin: 16px; }
-    pre { background: #f5f5f5; padding: 12px; }
-  </style>
-  <script src="https://cdn.plot.ly/plotly-2.27.0.min.js"></script>
-</head>
-<body>
-  <h2>Latest JSON</h2>
-  <pre id="raw">{}</pre>
-
-  <h2>Value Chart</h2>
-  <div id="chart" style="width: 100%; height: 420px;"></div>
-
-  <script>
-    const rawEl = document.getElementById("raw");
-    const xs = [];
-    const ys = [];
-
-    Plotly.newPlot("chart", [{
-      x: xs,
-      y: ys,
-      mode: "lines",
-      name: "value"
-    }], {
-      margin: { t: 20 },
-      xaxis: { title: "ts" },
-      yaxis: { title: "value" }
-    });
-
-    const es = new EventSource("/events");
-    es.onmessage = (ev) => {
-      rawEl.textContent = ev.data;
-
-      let obj;
-      try { obj = JSON.parse(ev.data); } catch { return; }
-
-      const ts = obj.ts ?? new Date().toISOString();
-      const v  = obj.value;
-
-      if (typeof v === "number") {
-        xs.push(ts);
-        ys.push(v);
-
-        // 点が増えすぎるのを防ぐ（例：直近500点）
-        if (xs.length > 500) { xs.shift(); ys.shift(); }
-
-        Plotly.react("chart", [{
-          x: xs,
-          y: ys,
-          mode: "lines",
-          name: "value"
-        }], {
-          margin: { t: 20 },
-          xaxis: { title: "ts" },
-          yaxis: { title: "value" }
-        });
-      }
-    };
-  </script>
-</body>
-</html>
-"""
-
-if __name__ == "__main__":
-    t = threading.Thread(target=zmq_subscriber_thread, daemon=True)
-    t.start()
-
-    # Flaskはlocalhost固定
-    app.run(host="127.0.0.1", port=18080, threaded=True)
-
-Loaded += async (_, __) =>
-{
-    await webView.EnsureCoreWebView2Async();
-    webView.CoreWebView2.Navigate("http://127.0.0.1:18080/");
-};
-
-
-using System;
-using System.Text.Json;
-using NetMQ;
-using NetMQ.Sockets;
-
-public sealed class ZmqJsonDocSubscriber : IDisposable
-{
-    private readonly SubscriberSocket _sub;
-    private readonly NetMQPoller _poller;
-
-    // (topic, jsonDocument, rawJson)
-    // 注意: JsonDocument は IDisposable。ハンドラ側で Dispose してください（下に例あり）。
-    public event Action<string?, JsonDocument, string>? MessageReceived;
-
-    public event Action<string?, string, Exception>? ParseError; // (topic, rawJson, ex)
-
-    public ZmqJsonDocSubscriber(string endpoint, string? topic = null)
-    {
-        AsyncIO.ForceDotNet.Force();
-
-        _sub = new SubscriberSocket();
-        _sub.Connect(endpoint);
-
-        if (string.IsNullOrEmpty(topic))
-            _sub.SubscribeToAnyTopic();
-        else
-            _sub.Subscribe(topic);
-
-        _sub.ReceiveReady += (_, __) => OnReceive();
-        _poller = new NetMQPoller { _sub };
+  function updateSide(sideObj, analysisEl, ctx, currentChart, fallbackTitle) {
+    if (!sideObj || typeof sideObj !== "object") {
+      analysisEl.textContent = "No data.";
+      if (currentChart) currentChart.destroy();
+      return null;
     }
 
-    public void Start() => _poller.RunAsync();
+    const points = toPoints(sideObj.ts, sideObj.value);
 
-    public void Stop()
-    {
-        if (_poller.IsRunning) _poller.Stop();
-    }
+    const title =
+      (typeof sideObj.title === "string" && sideObj.title.length > 0)
+        ? sideObj.title
+        : `${fallbackTitle} (N=${points.length})`;
 
-    private void OnReceive()
-    {
-        // multipart(topic + json) / single(json) の両対応
-        string? topic = null;
-        string rawJson;
+    const analysisText =
+      (sideObj.analysis && typeof sideObj.analysis === "object")
+        ? formatAnalysisFromObject(sideObj.analysis)
+        : `N=${points.length}`;
 
-        var msg = _sub.ReceiveMultipartMessage();
+    analysisEl.textContent = analysisText;
 
-        if (msg.FrameCount == 1)
-        {
-            rawJson = msg[0].ConvertToString();
-        }
-        else
-        {
-            topic = msg[0].ConvertToString();
-            rawJson = msg[1].ConvertToString();
-        }
+    return renderScatter(ctx, points, title, currentChart);
+  }
 
-        try
-        {
-            var doc = JsonDocument.Parse(rawJson);
-            MessageReceived?.Invoke(topic, doc, rawJson);
-            // doc.Dispose() は購読側（イベントハンドラ側）で実行してください
-        }
-        catch (Exception ex) when (ex is JsonException or ArgumentException)
-        {
-            ParseError?.Invoke(topic, rawJson, ex);
-        }
-    }
+  const es = new EventSource("/events");
 
-    public void Dispose()
-    {
-        Stop();
-        _sub.Dispose();
-        _poller.Dispose();
-        NetMQConfig.Cleanup();
-    }
-}
+  es.onmessage = (ev) => {
+    let obj;
+    try { obj = JSON.parse(ev.data); } catch { return; }
 
-// ------------------------
-// 使い方例
-// ------------------------
-public static class Example
-{
-    public static void Run()
-    {
-        var sub = new ZmqJsonDocSubscriber("tcp://127.0.0.1:5556", topic: "status");
+    // 左右別データ
+    chart1 = updateSide(obj.left, analysis1, ctx1, chart1, "Left");
+    chart2 = updateSide(obj.right, analysis2, ctx2, chart2, "Right");
+  };
 
-        sub.MessageReceived += (topic, doc, raw) =>
-        {
-            try
-            {
-                var root = doc.RootElement;
-
-                // 例: {"ts":"...","value":123.4,"status":"ok"}
-                if (root.TryGetProperty("value", out var v) && v.TryGetDouble(out var value))
-                {
-                    Console.WriteLine($"topic={topic ?? "(none)"} value={value}");
-                }
-
-                if (root.TryGetProperty("status", out var s) && s.ValueKind == JsonValueKind.String)
-                {
-                    Console.WriteLine($"status={s.GetString()}");
-                }
-            }
-            finally
-            {
-                // 重要: JsonDocument は Dispose する
-                doc.Dispose();
-            }
-        };
-
-        sub.ParseError += (topic, raw, ex) =>
-        {
-            Console.WriteLine($"JSON parse error topic={topic ?? "(none)"}: {ex.Message}");
-            Console.WriteLine(raw);
-        };
-
-        sub.Start();
-
-        Console.WriteLine("SUB running. Press Enter to exit.");
-        Console.ReadLine();
-
-        sub.Dispose();
-    }
-}
-
-
-using System;
-using System.Text.Json;
-using NetMQ;
-using NetMQ.Sockets;
-
-public sealed class ZmqJsonSubscriber<T> : IDisposable
-{
-    private readonly SubscriberSocket _sub;
-    private readonly NetMQPoller _poller;
-
-    // 受信した結果を外に通知（topic付き）
-    public event Action<string?, T, string>? MessageReceived; // (topic, data, rawJson)
-
-    private readonly JsonSerializerOptions _jsonOptions;
-
-    public ZmqJsonSubscriber(string endpoint, string? topic = null, JsonSerializerOptions? jsonOptions = null)
-    {
-        AsyncIO.ForceDotNet.Force();
-
-        _jsonOptions = jsonOptions ?? new JsonSerializerOptions
-        {
-            PropertyNameCaseInsensitive = true
-        };
-
-        _sub = new SubscriberSocket();
-        _sub.Connect(endpoint);
-
-        if (string.IsNullOrEmpty(topic))
-            _sub.SubscribeToAnyTopic();
-        else
-            _sub.Subscribe(topic);
-
-        _sub.ReceiveReady += (_, __) => OnReceive();
-
-        _poller = new NetMQPoller { _sub };
-    }
-
-    public void Start() => _poller.RunAsync();
-
-    private void OnReceive()
-    {
-        // 受信が multipart(topic+json) か single(json) かを吸収する
-        string? topic = null;
-        string rawJson;
-
-        // NetMQMessageでまとめて受けるとフレーム数を見られて便利
-        var msg = _sub.ReceiveMultipartMessage();
-
-        if (msg.FrameCount == 1)
-        {
-            rawJson = msg[0].ConvertToString();
-        }
-        else
-        {
-            topic = msg[0].ConvertToString();
-            rawJson = msg[1].ConvertToString();
-        }
-
-        try
-        {
-            var data = JsonSerializer.Deserialize<T>(rawJson, _jsonOptions);
-            if (data is null) return;
-
-            MessageReceived?.Invoke(topic, data, rawJson);
-        }
-        catch (JsonException)
-        {
-            // JSONが壊れている/想定外：ここでログに残すなど
-            // 必要なら rawJson をイベントで流す設計にしてもよい
-        }
-    }
-
-    public void Dispose()
-    {
-        if (_poller.IsRunning) _poller.Stop();
-        _sub.Dispose();
-        _poller.Dispose();
-        NetMQConfig.Cleanup();
-    }
-}
-
-
-using System.Net.WebSockets;
-using System.Text;
-using System.Windows;
-
-using Microsoft.AspNetCore.Builder;
-using Microsoft.AspNetCore.Hosting;
-using Microsoft.AspNetCore.Http;
-using Microsoft.Extensions.Hosting;
-
-public partial class MainWindow : Window
-{
-    private IHost? _host;
-
-    public MainWindow()
-    {
-        InitializeComponent();
-        StartWebSocketServer();
-    }
-
-    private void StartWebSocketServer()
-    {
-        // UI スレッドを塞がないように Host を起動
-        _host = Host.CreateDefaultBuilder()
-            .ConfigureWebHostDefaults(webBuilder =>
-            {
-                webBuilder.UseKestrel();
-                webBuilder.UseUrls("http://127.0.0.1:5005"); // 好きなポートに
-                webBuilder.Configure(app =>
-                {
-                    app.UseWebSockets();
-
-                    app.Map("/ws", async context =>
-                    {
-                        if (!context.WebSockets.IsWebSocketRequest)
-                        {
-                            context.Response.StatusCode = 400;
-                            await context.Response.WriteAsync("WebSocket only.");
-                            return;
-                        }
-
-                        using var ws = await context.WebSockets.AcceptWebSocketAsync();
-                        var buffer = new byte[16 * 1024];
-
-                        while (ws.State == WebSocketState.Open)
-                        {
-                            var result = await ws.ReceiveAsync(buffer, CancellationToken.None);
-
-                            if (result.MessageType == WebSocketMessageType.Close)
-                            {
-                                await ws.CloseAsync(WebSocketCloseStatus.NormalClosure, "bye", CancellationToken.None);
-                                break;
-                            }
-
-                            var msg = Encoding.UTF8.GetString(buffer, 0, result.Count);
-
-                            // UI 更新は Dispatcher 経由
-                            Dispatcher.Invoke(() =>
-                            {
-                                // 例：ListBox や TextBox に表示する等
-                                // MyTextBox.AppendText(msg + Environment.NewLine);
-                                Title = $"Rx: {msg}";
-                            });
-
-                            // エコー返信
-                            var reply = Encoding.UTF8.GetBytes($"echo: {msg}");
-                            await ws.SendAsync(reply, WebSocketMessageType.Text, true, CancellationToken.None);
-                        }
-                    });
-
-                    app.MapGet("/", () => "OK. Connect ws://127.0.0.1:5005/ws");
-                });
-            })
-            .Build();
-
-        _ = _host.StartAsync(); // await しない（バックグラウンド起動）
-    }
-
-    protected override async void OnClosed(EventArgs e)
-    {
-        base.OnClosed(e);
-
-        if (_host != null)
-        {
-            await _host.StopAsync();
-            _host.Dispose();
-        }
-    }
-}
+  es.onerror = () => {
+    analysis1.textContent = "SSE disconnected (will retry automatically).";
+    analysis2.textContent = "SSE disconnected (will retry automatically).";
+  };
+})();
