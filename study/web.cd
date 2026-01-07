@@ -1,3 +1,186 @@
+import json
+import time
+import queue
+import threading
+from typing import List, Optional
+
+import zmq
+from flask import Flask, Response
+
+app = Flask(__name__)
+
+# 最新データ（受信したJSONを保持）
+_latest_raw: str = "{}"
+_latest_lock = threading.Lock()
+
+# SSEクライアントごとのキュー
+_clients: List["queue.Queue[str]"] = []
+_clients_lock = threading.Lock()
+
+ZMQ_ENDPOINT = "tcp://127.0.0.1:18081"
+ZMQ_TOPIC = "telemetry"  # 送信側がtopicを付ける場合（multipart）
+
+def broadcast(raw_json: str) -> None:
+    # 全クライアントにpush（溜まりすぎるクライアントは捨てる）
+    with _clients_lock:
+        dead = []
+        for q in _clients:
+            try:
+                q.put_nowait(raw_json)
+            except queue.Full:
+                # 詰まっているクライアントは最新追従できないので古いのを捨てる
+                try:
+                    _ = q.get_nowait()
+                except queue.Empty:
+                    pass
+                try:
+                    q.put_nowait(raw_json)
+                except queue.Full:
+                    dead.append(q)
+        for q in dead:
+            _clients.remove(q)
+
+def zmq_subscriber_thread() -> None:
+    global _latest_raw
+
+    ctx = zmq.Context.instance()
+    sub = ctx.socket(zmq.SUB)
+    sub.connect(ZMQ_ENDPOINT)
+
+    # topic+payload の multipart を想定するなら topic 購読
+    sub.setsockopt_string(zmq.SUBSCRIBE, ZMQ_TOPIC)
+
+    while True:
+        try:
+            parts = sub.recv_multipart()
+            if len(parts) == 1:
+                raw = parts[0].decode("utf-8", errors="replace")
+            else:
+                # [topic, payload]
+                raw = parts[1].decode("utf-8", errors="replace")
+
+            # JSONとして最低限妥当かチェック（壊れてたら無視）
+            json.loads(raw)
+
+            with _latest_lock:
+                _latest_raw = raw
+
+            broadcast(raw)
+        except Exception:
+            # 運用ではログ推奨
+            time.sleep(0.05)
+
+@app.get("/events")
+def sse_events():
+    q: "queue.Queue[str]" = queue.Queue(maxsize=5)
+
+    with _clients_lock:
+        _clients.append(q)
+
+    def gen():
+        try:
+            # 接続直後に最新を1回送る
+            with _latest_lock:
+                first = _latest_raw
+            yield f"data: {first}\n\n"
+
+            while True:
+                raw = q.get()
+                yield f"data: {raw}\n\n"
+        finally:
+            with _clients_lock:
+                if q in _clients:
+                    _clients.remove(q)
+
+    return Response(gen(), mimetype="text/event-stream")
+
+@app.get("/")
+def index():
+    # 依存を増やさず、ブラウザ側でJSONを表示＋簡易グラフ（Plotly CDN利用）
+    # 会社ポリシーでCDN禁止なら、ここは自前で静的配布に切り替えます。
+    return """
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8" />
+  <title>Telemetry</title>
+  <style>
+    body { font-family: sans-serif; margin: 16px; }
+    pre { background: #f5f5f5; padding: 12px; }
+  </style>
+  <script src="https://cdn.plot.ly/plotly-2.27.0.min.js"></script>
+</head>
+<body>
+  <h2>Latest JSON</h2>
+  <pre id="raw">{}</pre>
+
+  <h2>Value Chart</h2>
+  <div id="chart" style="width: 100%; height: 420px;"></div>
+
+  <script>
+    const rawEl = document.getElementById("raw");
+    const xs = [];
+    const ys = [];
+
+    Plotly.newPlot("chart", [{
+      x: xs,
+      y: ys,
+      mode: "lines",
+      name: "value"
+    }], {
+      margin: { t: 20 },
+      xaxis: { title: "ts" },
+      yaxis: { title: "value" }
+    });
+
+    const es = new EventSource("/events");
+    es.onmessage = (ev) => {
+      rawEl.textContent = ev.data;
+
+      let obj;
+      try { obj = JSON.parse(ev.data); } catch { return; }
+
+      const ts = obj.ts ?? new Date().toISOString();
+      const v  = obj.value;
+
+      if (typeof v === "number") {
+        xs.push(ts);
+        ys.push(v);
+
+        // 点が増えすぎるのを防ぐ（例：直近500点）
+        if (xs.length > 500) { xs.shift(); ys.shift(); }
+
+        Plotly.react("chart", [{
+          x: xs,
+          y: ys,
+          mode: "lines",
+          name: "value"
+        }], {
+          margin: { t: 20 },
+          xaxis: { title: "ts" },
+          yaxis: { title: "value" }
+        });
+      }
+    };
+  </script>
+</body>
+</html>
+"""
+
+if __name__ == "__main__":
+    t = threading.Thread(target=zmq_subscriber_thread, daemon=True)
+    t.start()
+
+    # Flaskはlocalhost固定
+    app.run(host="127.0.0.1", port=18080, threaded=True)
+
+Loaded += async (_, __) =>
+{
+    await webView.EnsureCoreWebView2Async();
+    webView.CoreWebView2.Navigate("http://127.0.0.1:18080/");
+};
+
+
 using System;
 using System.Text.Json;
 using NetMQ;
