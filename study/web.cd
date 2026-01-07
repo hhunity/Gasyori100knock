@@ -1,3 +1,62 @@
+<script>
+  const rawEl = document.getElementById("raw");
+  const ctx = document.getElementById("chart").getContext("2d");
+
+  // 散布図は labels ではなく {x,y} の配列
+  const points = [];
+
+  const chart = new Chart(ctx, {
+    type: "scatter",
+    data: {
+      datasets: [{
+        label: "value vs ts",
+        data: points,
+        pointRadius: 2
+      }]
+    },
+    options: {
+      animation: false,
+      responsive: true,
+      parsing: false, // dataが {x,y} 形式なら明示しておくと少し軽い
+      scales: {
+        x: { type: "linear", title: { display: true, text: "ts" } },
+        y: { type: "linear", title: { display: true, text: "value" } }
+      }
+    }
+  });
+
+  const MAX_POINTS = 1000; // 表示点数の上限（必要に応じて）
+
+  function addPoint(x, y) {
+    if (typeof x !== "number" || typeof y !== "number") return;
+    points.push({ x, y });
+    if (points.length > MAX_POINTS) points.splice(0, points.length - MAX_POINTS);
+  }
+
+  // SSEでJSONを受け取って散布図更新
+  const es = new EventSource("/events");
+
+  es.onmessage = (ev) => {
+    rawEl.textContent = ev.data;
+
+    let obj;
+    try { obj = JSON.parse(ev.data); } catch { return; }
+
+    // バッチ: {"ts":[...], "value":[...]}
+    if (Array.isArray(obj.ts) && Array.isArray(obj.value) && obj.ts.length === obj.value.length) {
+      for (let i = 0; i < obj.ts.length; i++) {
+        addPoint(obj.ts[i], obj.value[i]);
+      }
+      chart.update("none");
+      return;
+    }
+
+    // 1点: {"ts": 1.23, "value": 4.56}
+    addPoint(obj.ts, obj.value);
+    chart.update("none");
+  };
+</script>
+
 es.onmessage = (ev) => {
   let obj;
   try { obj = JSON.parse(ev.data); } catch { return; }
