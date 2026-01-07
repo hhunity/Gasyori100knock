@@ -1,3 +1,136 @@
+(() => {
+  const analysisEl = document.getElementById("analysis");
+  const canvas = document.getElementById("chart");
+  if (!analysisEl || !canvas) return;
+
+  const ctx = canvas.getContext("2d");
+
+  function toPoints(xs, ys) {
+    if (!Array.isArray(xs) || !Array.isArray(ys)) return [];
+    const n = Math.min(xs.length, ys.length);
+    const pts = [];
+    for (let i = 0; i < n; i++) {
+      const x = xs[i], y = ys[i];
+      if (typeof x === "number" && typeof y === "number" && Number.isFinite(x) && Number.isFinite(y)) {
+        pts.push({ x, y });
+      }
+    }
+    return pts;
+  }
+
+  // --- Chart (1 instance) ---
+  const chart = new Chart(ctx, {
+    type: "scatter",
+    data: {
+      datasets: [
+        { label: "Left-1",  yAxisID: "yL1", data: [], pointRadius: 2, showLine: false },
+        { label: "Left-2",  yAxisID: "yL2", data: [], pointRadius: 2, showLine: false },
+        { label: "Right-1", yAxisID: "yR1", data: [], pointRadius: 2, showLine: false },
+        { label: "Right-2", yAxisID: "yR2", data: [], pointRadius: 2, showLine: false }
+      ]
+    },
+    options: {
+      responsive: true,
+      maintainAspectRatio: false,
+      parsing: false,
+      animation: false,
+      plugins: {
+        title: { display: true, text: "Scatter" },
+        legend: { display: true } // 凡例クリックで系列ON/OFF可能
+      },
+      scales: {
+        x: { type: "linear", title: { display: true, text: "ts" } },
+
+        // --- Left (2 axes) ---
+        yL1: {
+          type: "linear",
+          position: "left",
+          title: { display: true, text: "left value 1" },
+          // グリッドは代表としてこれだけ表示（見やすさ優先）
+          grid: { drawOnChartArea: true }
+        },
+        yL2: {
+          type: "linear",
+          position: "left",
+          offset: true,                  // 左側の2本目を外側にずらす
+          title: { display: true, text: "left value 2" },
+          grid: { drawOnChartArea: false } // 追加軸のグリッドは消す
+        },
+
+        // --- Right (2 axes) ---
+        yR1: {
+          type: "linear",
+          position: "right",
+          title: { display: true, text: "right value 1" },
+          grid: { drawOnChartArea: false }
+        },
+        yR2: {
+          type: "linear",
+          position: "right",
+          offset: true,                  // 右側の2本目を外側にずらす
+          title: { display: true, text: "right value 2" },
+          grid: { drawOnChartArea: false }
+        }
+      }
+    }
+  });
+
+  const es = new EventSource("/events");
+  es.onmessage = (ev) => {
+    let obj;
+    try { obj = JSON.parse(ev.data); } catch { return; }
+
+    // 互換: value2 が無い場合に備えて val2/valueB も許容
+    const l = obj.left ?? {};
+    const r = obj.right ?? {};
+
+    const leftTs   = l.ts;
+    const rightTs  = r.ts;
+
+    const leftY1   = l.value;
+    const leftY2   = l.value2 ?? l.valueB ?? l.value_2;
+
+    const rightY1  = r.value;
+    const rightY2  = r.value2 ?? r.valueB ?? r.value_2;
+
+    const leftPts1  = toPoints(leftTs,  leftY1);
+    const leftPts2  = toPoints(leftTs,  leftY2);
+
+    const rightPts1 = toPoints(rightTs, rightY1);
+    const rightPts2 = toPoints(rightTs, rightY2);
+
+    const title = (typeof obj.title === "string" && obj.title.length)
+      ? obj.title
+      : `L1=${leftPts1.length}, L2=${leftPts2.length}, R1=${rightPts1.length}, R2=${rightPts2.length}`;
+
+    chart.options.plugins.title.text = title;
+
+    if (obj.analysis && typeof obj.analysis === "object") {
+      analysisEl.textContent = JSON.stringify(obj.analysis, null, 2);
+    } else {
+      analysisEl.textContent =
+        `Left-1 N=${leftPts1.length}\n` +
+        `Left-2 N=${leftPts2.length}\n` +
+        `Right-1 N=${rightPts1.length}\n` +
+        `Right-2 N=${rightPts2.length}`;
+    }
+
+    // データ差し替え（4系列）
+    chart.data.datasets[0].data = leftPts1;   // yL1
+    chart.data.datasets[1].data = leftPts2;   // yL2
+    chart.data.datasets[2].data = rightPts1;  // yR1
+    chart.data.datasets[3].data = rightPts2;  // yR2
+
+    chart.update("none");
+  };
+
+  es.onerror = () => {
+    analysisEl.textContent = "SSE disconnected (will retry automatically).";
+  };
+})();
+
+
+
 
 (() => {
   const analysisEl = document.getElementById("analysis");
