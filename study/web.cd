@@ -1,3 +1,27 @@
+
+es.onmessage = (ev) => {
+  let obj;
+  try { obj = JSON.parse(ev.data); } catch { return; }
+
+  // タイトル（JSONに無ければ適当なデフォルト）
+  const title = (typeof obj.title === "string") ? obj.title : "Scatter Plot";
+
+  // 解析情報（JSONの analysis をそのまま表示）
+  if (obj.analysis && typeof obj.analysis === "object") {
+    analysisEl.textContent = JSON.stringify(obj.analysis, null, 2);
+  } else {
+    analysisEl.textContent = "";
+  }
+
+  // データ
+  if (!Array.isArray(obj.ts) || !Array.isArray(obj.value)) return;
+
+  const points = toPoints(obj.ts, obj.value);
+
+  // 毎回初期化して描画
+  renderNewChart(points, title);
+};
+
 <script>
   const rawEl = document.getElementById("raw");
   const infoEl = document.getElementById("info"); // ← 文字表示用（下のHTML参照）
