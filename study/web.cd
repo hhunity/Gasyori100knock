@@ -1,3 +1,85 @@
+using System;
+using System.Text.Json;
+using NetMQ;
+using NetMQ.Sockets;
+
+public sealed class ZmqJsonSubscriber<T> : IDisposable
+{
+    private readonly SubscriberSocket _sub;
+    private readonly NetMQPoller _poller;
+
+    // 受信した結果を外に通知（topic付き）
+    public event Action<string?, T, string>? MessageReceived; // (topic, data, rawJson)
+
+    private readonly JsonSerializerOptions _jsonOptions;
+
+    public ZmqJsonSubscriber(string endpoint, string? topic = null, JsonSerializerOptions? jsonOptions = null)
+    {
+        AsyncIO.ForceDotNet.Force();
+
+        _jsonOptions = jsonOptions ?? new JsonSerializerOptions
+        {
+            PropertyNameCaseInsensitive = true
+        };
+
+        _sub = new SubscriberSocket();
+        _sub.Connect(endpoint);
+
+        if (string.IsNullOrEmpty(topic))
+            _sub.SubscribeToAnyTopic();
+        else
+            _sub.Subscribe(topic);
+
+        _sub.ReceiveReady += (_, __) => OnReceive();
+
+        _poller = new NetMQPoller { _sub };
+    }
+
+    public void Start() => _poller.RunAsync();
+
+    private void OnReceive()
+    {
+        // 受信が multipart(topic+json) か single(json) かを吸収する
+        string? topic = null;
+        string rawJson;
+
+        // NetMQMessageでまとめて受けるとフレーム数を見られて便利
+        var msg = _sub.ReceiveMultipartMessage();
+
+        if (msg.FrameCount == 1)
+        {
+            rawJson = msg[0].ConvertToString();
+        }
+        else
+        {
+            topic = msg[0].ConvertToString();
+            rawJson = msg[1].ConvertToString();
+        }
+
+        try
+        {
+            var data = JsonSerializer.Deserialize<T>(rawJson, _jsonOptions);
+            if (data is null) return;
+
+            MessageReceived?.Invoke(topic, data, rawJson);
+        }
+        catch (JsonException)
+        {
+            // JSONが壊れている/想定外：ここでログに残すなど
+            // 必要なら rawJson をイベントで流す設計にしてもよい
+        }
+    }
+
+    public void Dispose()
+    {
+        if (_poller.IsRunning) _poller.Stop();
+        _sub.Dispose();
+        _poller.Dispose();
+        NetMQConfig.Cleanup();
+    }
+}
+
+
 using System.Net.WebSockets;
 using System.Text;
 using System.Windows;
