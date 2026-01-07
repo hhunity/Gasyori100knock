@@ -1,4 +1,177 @@
 
+<!doctype html>
+<html lang="ja">
+<head>
+  <meta charset="utf-8" />
+  <title>Scatter Viewer</title>
+  <style>
+    body { font-family: sans-serif; margin: 16px; }
+    #analysis {
+      margin: 10px 0;
+      padding: 10px 12px;
+      background: #f5f5f5;
+      white-space: pre-wrap;
+      border: 1px solid #ddd;
+    }
+    canvas { background: #fff; border: 1px solid #ddd; }
+  </style>
+
+  <!-- Chart.js -->
+  <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
+</head>
+<body>
+  <h2>Scatter Plot</h2>
+
+  <div id="analysis">waiting...</div>
+
+  <canvas id="chart" width="900" height="420"></canvas>
+
+  <script>
+    const analysisEl = document.getElementById("analysis");
+    const ctx = document.getElementById("chart").getContext("2d");
+
+    let chart = null;
+    let seq = 0;
+
+    function toPoints(xs, ys) {
+      const n = Math.min(xs.length, ys.length);
+      const pts = [];
+      for (let i = 0; i < n; i++) {
+        const x = xs[i], y = ys[i];
+        if (typeof x === "number" && typeof y === "number" && Number.isFinite(x) && Number.isFinite(y)) {
+          pts.push({ x, y });
+        }
+      }
+      return pts;
+    }
+
+    // 解析情報（必要最低限 + 回帰/相関）
+    function analyze(points) {
+      const n = points.length;
+      if (n === 0) return { n: 0 };
+
+      let minX = points[0].x, maxX = points[0].x;
+      let minY = points[0].y, maxY = points[0].y;
+      let sumX = 0, sumY = 0;
+
+      for (const p of points) {
+        if (p.x < minX) minX = p.x;
+        if (p.x > maxX) maxX = p.x;
+        if (p.y < minY) minY = p.y;
+        if (p.y > maxY) maxY = p.y;
+        sumX += p.x;
+        sumY += p.y;
+      }
+
+      const meanX = sumX / n;
+      const meanY = sumY / n;
+
+      let sxx = 0, syy = 0, sxy = 0;
+      for (const p of points) {
+        const dx = p.x - meanX;
+        const dy = p.y - meanY;
+        sxx += dx * dx;
+        syy += dy * dy;
+        sxy += dx * dy;
+      }
+
+      // 標準偏差（不偏ではなく母標準偏差に近い形：用途に応じて変更可）
+      const stdX = Math.sqrt(sxx / n);
+      const stdY = Math.sqrt(syy / n);
+
+      // 相関係数（0割り防止）
+      const corr = (sxx > 0 && syy > 0) ? (sxy / Math.sqrt(sxx * syy)) : null;
+
+      // 単回帰 y = a*x + b
+      const slope = (sxx > 0) ? (sxy / sxx) : null;
+      const intercept = (slope != null) ? (meanY - slope * meanX) : null;
+
+      return {
+        n, minX, maxX, minY, maxY, meanX, meanY, stdX, stdY, corr, slope, intercept
+      };
+    }
+
+    function formatAnalysis(a) {
+      if (!a || a.n === 0) return "No valid points.";
+
+      const lines = [];
+      lines.push(`N = ${a.n}`);
+      lines.push(`X: min=${a.minX}, max=${a.maxX}, mean=${a.meanX.toFixed(6)}, std=${a.stdX.toFixed(6)}`);
+      lines.push(`Y: min=${a.minY}, max=${a.maxY}, mean=${a.meanY.toFixed(6)}, std=${a.stdY.toFixed(6)}`);
+
+      if (a.corr != null) lines.push(`corr(x,y) = ${a.corr.toFixed(6)}`);
+      if (a.slope != null && a.intercept != null) {
+        lines.push(`fit: y = ${a.slope.toFixed(6)} * x + ${a.intercept.toFixed(6)}`);
+      }
+      return lines.join("\n");
+    }
+
+    // 毎回「初期化」＝destroyしてnew Chart
+    function renderNewChart(points, titleText) {
+      if (chart) {
+        chart.destroy();
+        chart = null;
+      }
+
+      chart = new Chart(ctx, {
+        type: "scatter",
+        data: {
+          datasets: [{
+            label: "points",
+            data: points,
+            pointRadius: 2,
+            showLine: false
+          }]
+        },
+        options: {
+          animation: false,
+          responsive: true,
+          parsing: false,
+          plugins: {
+            title: {
+              display: true,
+              text: titleText
+            }
+          },
+          scales: {
+            x: { type: "linear", title: { display: true, text: "ts" } },
+            y: { type: "linear", title: { display: true, text: "value" } }
+          }
+        }
+      });
+    }
+
+    // SSE受信
+    const es = new EventSource("/events");
+    es.onmessage = (ev) => {
+      let obj;
+      try { obj = JSON.parse(ev.data); } catch { return; }
+
+      // 想定：両方数値配列 {"ts":[...], "value":[...]}
+      if (!Array.isArray(obj.ts) || !Array.isArray(obj.value)) return;
+
+      const points = toPoints(obj.ts, obj.value);
+      const a = analyze(points);
+
+      seq += 1;
+
+      // タイトル（例）：任意で obj.title 等があれば優先してもOK
+      const title = `Scatter Plot #${seq} (N=${a.n ?? 0})`;
+
+      // 解析情報はHTMLに表示（不要なら消してよい）
+      analysisEl.textContent = formatAnalysis(a);
+
+      // グラフは毎回初期化して描画
+      renderNewChart(points, title);
+    };
+
+    es.onerror = () => {
+      analysisEl.textContent = "SSE disconnected (will retry automatically).";
+    };
+  </script>
+</body>
+</html>
+
 es.onmessage = (ev) => {
   let obj;
   try { obj = JSON.parse(ev.data); } catch { return; }
