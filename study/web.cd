@@ -1,3 +1,95 @@
+
+<!doctype html>
+<html lang="ja">
+<head>
+  <meta charset="utf-8" />
+  <title>Telemetry Viewer</title>
+  <style>
+    body { font-family: sans-serif; margin: 16px; }
+    .row { display: flex; gap: 16px; }
+    .panel { flex: 1; }
+    pre { background: #f5f5f5; padding: 12px; height: 180px; overflow: auto; }
+    canvas { background: #fff; border: 1px solid #ddd; }
+  </style>
+
+  <!-- Chart.js (CDN) -->
+  <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
+</head>
+<body>
+  <h2>Latest JSON</h2>
+
+  <div class="row">
+    <div class="panel">
+      <pre id="raw">{}</pre>
+    </div>
+    <div class="panel">
+      <canvas id="chart" width="900" height="420"></canvas>
+    </div>
+  </div>
+
+  <script>
+    const rawEl = document.getElementById("raw");
+    const ctx = document.getElementById("chart").getContext("2d");
+
+    const labels = [];
+    const data = [];
+
+    const chart = new Chart(ctx, {
+      type: "line",
+      data: {
+        labels,
+        datasets: [{
+          label: "value",
+          data,
+          tension: 0.15,
+          pointRadius: 0
+        }]
+      },
+      options: {
+        animation: false,
+        responsive: true,
+        scales: {
+          x: { title: { display: true, text: "ts" } },
+          y: { title: { display: true, text: "value" } }
+        }
+      }
+    });
+
+    // SSEでJSONを受け取ってグラフ更新
+    const es = new EventSource("/events");
+
+    es.onmessage = (ev) => {
+      rawEl.textContent = ev.data;
+
+      let obj;
+      try { obj = JSON.parse(ev.data); } catch { return; }
+
+      // 想定: {"ts":"...","value":123.4}
+      const ts = (typeof obj.ts === "string") ? obj.ts : new Date().toISOString();
+      const v  = obj.value;
+
+      if (typeof v === "number") {
+        labels.push(ts);
+        data.push(v);
+
+        // 点数制限（例：直近500点）
+        if (labels.length > 500) {
+          labels.shift();
+          data.shift();
+        }
+
+        chart.update("none"); // 軽量更新
+      }
+    };
+
+    es.onerror = () => {
+      // ネットワーク/サーバ停止時など。必要なら表示や再接続ロジックを追加
+      // EventSourceは通常自動で再接続します
+    };
+  </script>
+</body>
+</html>
+
 import json
 import time
 import queue
