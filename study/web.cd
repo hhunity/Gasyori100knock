@@ -1,5 +1,105 @@
 <script>
   const rawEl = document.getElementById("raw");
+  const infoEl = document.getElementById("info"); // ← 文字表示用（下のHTML参照）
+  const ctx = document.getElementById("chart").getContext("2d");
+
+  const points = [];
+
+  // グラフ上に文字を重ねる（任意）
+  const overlayTextPlugin = {
+    id: "overlayText",
+    afterDraw(chart, args, opts) {
+      if (!opts || !opts.text) return;
+      const { ctx, chartArea } = chart;
+      ctx.save();
+      ctx.font = "12px sans-serif";
+      ctx.fillText(opts.text, chartArea.left + 8, chartArea.top + 16);
+      ctx.restore();
+    }
+  };
+  Chart.register(overlayTextPlugin);
+
+  const chart = new Chart(ctx, {
+    type: "scatter",
+    data: {
+      datasets: [{
+        label: "value vs ts",
+        data: points,
+        pointRadius: 2,
+        showLine: false
+      }]
+    },
+    options: {
+      animation: false,
+      responsive: true,
+      parsing: false,
+      scales: {
+        x: { type: "linear", title: { display: true, text: "ts" } },
+        y: { type: "linear", title: { display: true, text: "value" } }
+      },
+      plugins: {
+        overlayText: { text: "" }   // ← canvas上の文字（任意）
+      }
+    }
+  });
+
+  function setPointsFromArrays(xs, ys) {
+    // “毎回初回から” = 受信ごとに全消去
+    points.length = 0;
+    const n = Math.min(xs.length, ys.length);
+    for (let i = 0; i < n; i++) {
+      const x = xs[i], y = ys[i];
+      if (typeof x === "number" && typeof y === "number") {
+        points.push({ x, y });
+      }
+    }
+    return points.length;
+  }
+
+  function updateText(lastX, lastY) {
+    // (A) HTML上に表示
+    if (infoEl) {
+      infoEl.textContent = `N=${points.length}` + (lastX != null ? `  last=(${lastX}, ${lastY})` : "");
+    }
+    // (B) グラフ上に重ね表示
+    chart.options.plugins.overlayText.text =
+      `N=${points.length}` + (lastX != null ? `  last=(${lastX}, ${lastY})` : "");
+  }
+
+  const es = new EventSource("/events");
+  es.onmessage = (ev) => {
+    rawEl.textContent = ev.data;
+
+    let obj;
+    try { obj = JSON.parse(ev.data); } catch { return; }
+
+    // バッチ形式: {"ts":[...], "value":[...]}
+    if (Array.isArray(obj.ts) && Array.isArray(obj.value)) {
+      const count = setPointsFromArrays(obj.ts, obj.value);
+
+      let lastX = null, lastY = null;
+      if (count > 0) {
+        lastX = points[count - 1].x;
+        lastY = points[count - 1].y;
+      }
+      updateText(lastX, lastY);
+
+      chart.update("none");
+      return;
+    }
+
+    // 1点形式: {"ts": 1.23, "value": 4.56}
+    if (typeof obj.ts === "number" && typeof obj.value === "number") {
+      points.length = 0;                 // ← 1点でも“初回から”なら全消去
+      points.push({ x: obj.ts, y: obj.value });
+      updateText(obj.ts, obj.value);
+      chart.update("none");
+    }
+  };
+</script>
+
+<script>
+  const rawEl = document.getElementById("raw");
   const ctx = document.getElementById("chart").getContext("2d");
 
   // 散布図は labels ではなく {x,y} の配列
