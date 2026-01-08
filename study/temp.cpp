@@ -1,3 +1,27 @@
+
+auto dump_request = [](const httplib::Request& req) {
+  std::cerr << "---- HTTP Request ----\n";
+  std::cerr << req.method << " " << req.path << "\n";
+
+  if (!req.params.empty()) {
+    std::cerr << "Params:\n";
+    for (const auto& [k, v] : req.params) {
+      std::cerr << "  " << k << " = " << v << "\n";
+    }
+  }
+
+  std::cerr << "Headers:\n";
+  for (const auto& h : req.headers) {
+    std::cerr << "  " << h.first << ": " << h.second << "\n";
+  }
+
+  std::cerr << "Body (" << req.body.size() << " bytes):\n";
+  // バイナリが来る可能性があるなら、必要に応じて長さ制限
+  std::cerr << req.body << "\n";
+  std::cerr << "----------------------\n";
+};
+
+
 // main.cpp
 #include "httplib.h"
 #include "json.hpp" // nlohmann::json (single header)
