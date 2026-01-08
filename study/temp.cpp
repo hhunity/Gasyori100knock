@@ -1,3 +1,276 @@
+// main.cpp
+#include "httplib.h"
+#include "json.hpp" // nlohmann::json (single header)
+#include <atomic>
+#include <condition_variable>
+#include <cstdint>
+#include <deque>
+#include <mutex>
+#include <optional>
+#include <string>
+#include <thread>
+#include <unordered_map>
+
+using json = nlohmann::json;
+
+// -------------------- Domain: Camera (mock) --------------------
+struct Camera {
+  bool connected = false;
+
+  bool connect(std::string& err) {
+    if (connected) return true;
+    // TODO: SDK connect
+    connected = true;
+    return true;
+  }
+  bool disconnect(std::string& err) {
+    if (!connected) return true;
+    // TODO: SDK disconnect
+    connected = false;
+    return true;
+  }
+  bool capture(std::string& err) {
+    if (!connected) { err = "camera not connected"; return false; }
+    // TODO: SDK capture
+    return true;
+  }
+};
+
+// -------------------- Job system --------------------
+enum class JobState { Queued, Running, Done, Failed, Canceled };
+
+static const char* to_string(JobState s) {
+  switch (s) {
+    case JobState::Queued: return "queued";
+    case JobState::Running: return "running";
+    case JobState::Done: return "done";
+    case JobState::Failed: return "failed";
+    case JobState::Canceled: return "canceled";
+  }
+  return "unknown";
+}
+
+struct Job {
+  uint64_t id{};
+  std::string cmd;
+  json args;
+
+  std::atomic<JobState> state{JobState::Queued};
+  std::atomic<bool> cancel_requested{false};
+
+  // result
+  std::mutex result_mtx;
+  json result;
+  std::string error;
+};
+
+class JobManager {
+public:
+  uint64_t enqueue(std::string cmd, json args) {
+    auto job = std::make_shared<Job>();
+    job->id = ++next_id_;
+    job->cmd = std::move(cmd);
+    job->args = std::move(args);
+
+    {
+      std::lock_guard lk(mtx_);
+      jobs_[job->id] = job;
+      q_.push_back(job);
+    }
+    cv_.notify_one();
+    return job->id;
+  }
+
+  std::shared_ptr<Job> get(uint64_t id) {
+    std::lock_guard lk(mtx_);
+    auto it = jobs_.find(id);
+    return (it == jobs_.end()) ? nullptr : it->second;
+  }
+
+  bool request_cancel(uint64_t id) {
+    auto job = get(id);
+    if (!job) return false;
+    job->cancel_requested.store(true, std::memory_order_relaxed);
+    return true;
+  }
+
+  void start_worker() {
+    worker_ = std::thread([this] { worker_loop(); });
+  }
+
+  void stop_worker() {
+    stop_.store(true);
+    cv_.notify_all();
+    if (worker_.joinable()) worker_.join();
+  }
+
+private:
+  void worker_loop() {
+    while (!stop_.load()) {
+      std::shared_ptr<Job> job;
+
+      {
+        std::unique_lock lk(mtx_);
+        cv_.wait(lk, [&] { return stop_.load() || !q_.empty(); });
+        if (stop_.load()) break;
+        job = q_.front();
+        q_.pop_front();
+      }
+
+      // If canceled before start
+      if (job->cancel_requested.load(std::memory_order_relaxed)) {
+        job->state.store(JobState::Canceled);
+        continue;
+      }
+
+      job->state.store(JobState::Running);
+      std::string err;
+      json out;
+
+      // ---- Execute command (serialize camera access here) ----
+      bool ok = execute_command(*job, out, err);
+
+      if (job->cancel_requested.load(std::memory_order_relaxed)) {
+        job->state.store(JobState::Canceled);
+      } else if (ok) {
+        {
+          std::lock_guard lk(job->result_mtx);
+          job->result = std::move(out);
+        }
+        job->state.store(JobState::Done);
+      } else {
+        {
+          std::lock_guard lk(job->result_mtx);
+          job->error = err;
+        }
+        job->state.store(JobState::Failed);
+      }
+    }
+  }
+
+  bool execute_command(Job& job, json& out, std::string& err) {
+    // ここでカメラを排他制御（ワーカー1本なら自然に直列化）
+    if (job.cmd == "camera.connect") {
+      bool ok = cam_.connect(err);
+      out = json{{"connected", cam_.connected}};
+      return ok;
+    }
+    if (job.cmd == "camera.disconnect") {
+      bool ok = cam_.disconnect(err);
+      out = json{{"connected", cam_.connected}};
+      return ok;
+    }
+    if (job.cmd == "camera.capture") {
+      // 例: args で枚数や露光などを受ける
+      // auto exp = job.args.value("exposure_us", 1000);
+      bool ok = cam_.capture(err);
+      out = json{{"captured", ok}};
+      return ok;
+    }
+
+    err = "unknown cmd: " + job.cmd;
+    return false;
+  }
+
+private:
+  std::atomic<bool> stop_{false};
+  std::thread worker_;
+
+  std::mutex mtx_;
+  std::condition_variable cv_;
+  std::deque<std::shared_ptr<Job>> q_;
+  std::unordered_map<uint64_t, std::shared_ptr<Job>> jobs_;
+  std::atomic<uint64_t> next_id_{0};
+
+  Camera cam_;
+};
+
+// -------------------- HTTP server --------------------
+static uint64_t parse_u64(const std::string& s) {
+  return static_cast<uint64_t>(std::stoull(s));
+}
+
+int main() {
+  JobManager jm;
+  jm.start_worker();
+
+  httplib::Server svr;
+
+  // スレッドプール（HTTPは並列に捌く）
+  svr.new_task_queue = [] { return new httplib::ThreadPool(8); };
+
+  svr.Get("/health", [](const httplib::Request&, httplib::Response& res) {
+    res.set_content(R"({"ok":true})", "application/json");
+  });
+
+  // POST /cmd  { "cmd":"camera.connect", "args":{...} }
+  svr.Post("/cmd", [&](const httplib::Request& req, httplib::Response& res) {
+    try {
+      auto body = json::parse(req.body);
+      std::string cmd = body.value("cmd", "");
+      json args = body.value("args", json::object());
+
+      if (cmd.empty()) {
+        res.status = 400;
+        res.set_content(R"({"error":"cmd is required"})", "application/json");
+        return;
+      }
+
+      uint64_t id = jm.enqueue(cmd, args);
+      json reply = {{"job_id", id}};
+      res.status = 202;
+      res.set_content(reply.dump(), "application/json");
+    } catch (...) {
+      res.status = 400;
+      res.set_content(R"({"error":"invalid json"})", "application/json");
+    }
+  });
+
+  // GET /job/<id>
+  svr.Get(R"(/job/(\d+))", [&](const httplib::Request& req, httplib::Response& res) {
+    uint64_t id = parse_u64(req.matches[1]);
+    auto job = jm.get(id);
+    if (!job) {
+      res.status = 404;
+      res.set_content(R"({"error":"job not found"})", "application/json");
+      return;
+    }
+
+    json reply;
+    reply["job_id"] = id;
+    reply["cmd"] = job->cmd;
+    reply["state"] = to_string(job->state.load());
+    reply["cancel_requested"] = job->cancel_requested.load();
+
+    {
+      std::lock_guard lk(job->result_mtx);
+      if (job->state.load() == JobState::Done) reply["result"] = job->result;
+      if (job->state.load() == JobState::Failed) reply["error"] = job->error;
+    }
+
+    res.set_content(reply.dump(), "application/json");
+  });
+
+  // POST /job/<id>/cancel
+  svr.Post(R"(/job/(\d+)/cancel)", [&](const httplib::Request& req, httplib::Response& res) {
+    (void)req;
+    uint64_t id = parse_u64(req.matches[1]);
+    bool ok = jm.request_cancel(id);
+    if (!ok) {
+      res.status = 404;
+      res.set_content(R"({"error":"job not found"})", "application/json");
+      return;
+    }
+    res.set_content(R"({"ok":true})", "application/json");
+  });
+
+  // 推奨: まずは localhost バインド（社内PC運用なら安全）
+  svr.listen("127.0.0.1", 18080);
+
+  jm.stop_worker();
+  return 0;
+}
+
 # Debug ビルド時の成果物をコピー
 install(
     DIRECTORY ${CMAKE_BINARY_DIR}/Debug/
