@@ -1,3 +1,23 @@
+
+zoom: {
+      pan: {
+        enabled: true,
+        mode: "x",                // "x" / "y" / "xy"
+        modifierKey: "ctrl"       // Ctrl押しながらドラッグでパン（誤操作防止）
+      },
+      zoom: {
+        wheel: { enabled: true }, // ホイールズーム
+        pinch: { enabled: true }, // タッチ
+        drag: { enabled: true },  // ドラッグ範囲でズーム
+        mode: "x"                 // 例：x方向だけズーム
+      }
+    }
+  },
+
+  scales: { ... }
+}
+
+
 (() => {
   const analysisEl = document.getElementById("analysis");
   const canvas = document.getElementById("chart");
