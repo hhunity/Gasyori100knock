@@ -1,3 +1,16 @@
+///構造足りのホットリロード
+std::atomic<std::shared_ptr<const PipelineConfig>> g_cfg;
+
+void update_config(PipelineConfig new_cfg) {
+  g_cfg.store(std::make_shared<const PipelineConfig>(std::move(new_cfg)));
+}
+
+void worker() {
+  auto cfg = g_cfg.load(); // この時点のスナップショット
+  // cfg->camera..., cfg->processing...
+}
+
+
 //c#でおくる
 using System.Net.Http;
 using System.Net.Http.Headers;
