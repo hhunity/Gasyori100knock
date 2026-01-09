@@ -1,3 +1,23 @@
+
+//
+//PipelineConfig は「外部入力の正規化結果」として集約してよい
+//ただし構築時に分解する
+auto cfg = load_pipeline_config("config.json"); // JSONからパースして型に落とす
+
+auto cam  = std::make_unique<Camera>(cfg.camera);
+auto proc = std::make_unique<ImageProcessor>(cfg.processing);
+
+Pipeline pl(*cam, *proc); // pipeline は非所有参照（前の話）
+
+auto cfg = load_pipeline_config("config.json"); // JSONからパースして型に落とす
+
+auto cam  = std::make_unique<Camera>(cfg.camera);
+auto proc = std::make_unique<ImageProcessor>(cfg.processing);
+
+Pipeline pl(*cam, *proc); // pipeline は非所有参照（前の話）
+
+//--------------------------------------------
+
 class Camera {
 public:
     void start();
