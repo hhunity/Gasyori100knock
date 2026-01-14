@@ -1,4 +1,52 @@
 
+#include "httplib.h"
+#include <fstream>
+#include <string>
+
+int main() {
+  httplib::Server svr;
+
+  svr.Put("/upload", [](const httplib::Request& req, httplib::Response& res) {
+    if (!req.is_multipart_form_data()) {
+      res.status = 415;
+      res.set_content("expected multipart/form-data", "text/plain");
+      return;
+    }
+
+    // JSON: 「ファイルとして送られてくる」ケース（name="json"; filename="xxx.json"）
+    // もしくは「文字列フィールドとして送られてくる」ケース（name="metadata" など）
+    std::string json_text;
+    if (req.has_file("json")) {
+      const auto jf = req.get_file_value("json");
+      json_text = jf.content;
+    } else if (req.has_param("metadata")) {
+      json_text = req.get_param_value("metadata");
+    } else {
+      res.status = 400;
+      res.set_content("missing json/metadata part", "text/plain");
+      return;
+    }
+
+    // バイナリ
+    if (!req.has_file("bin")) {
+      res.status = 400;
+      res.set_content("missing bin part", "text/plain");
+      return;
+    }
+    const auto bf = req.get_file_value("bin");
+
+    // bf.content はバイナリ（\0含む）でも保持できるので、ofstream.write で保存
+    std::ofstream ofs("upload.bin", std::ios::binary);
+    ofs.write(bf.content.data(), static_cast<std::streamsize>(bf.content.size()));
+    ofs.close();
+
+    // json_text はここで JSON parse（nlohmann/json 等）
+    res.set_content("ok", "text/plain");
+  });
+
+  svr.listen("0.0.0.0", 8080);
+}
+
 using System.Net.Http;
 using System.Net.Http.Headers;
 using System.Text;
