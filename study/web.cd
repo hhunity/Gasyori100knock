@@ -1,4 +1,42 @@
 
+using System.Net.Http;
+using System.Net.Http.Headers;
+using System.Text;
+
+static async Task SendPutMultipartAsync(
+    Uri endpoint,
+    string jsonFilePath,
+    string binaryFilePath,
+    CancellationToken ct = default)
+{
+    using var http = new HttpClient();
+
+    // PUT + multipart を作るには HttpRequestMessage を使うのが確実
+    using var req = new HttpRequestMessage(HttpMethod.Put, endpoint);
+
+    var multipart = new MultipartFormDataContent(); // boundary は自動で付与される
+
+    // --- JSON part (file) ---
+    // サーバが「json」というフォーム名で受け取る想定
+    var jsonStream = File.OpenRead(jsonFilePath);
+    var jsonContent = new StreamContent(jsonStream);
+    jsonContent.Headers.ContentType = new MediaTypeHeaderValue("application/json");
+    multipart.Add(jsonContent, name: "json", fileName: Path.GetFileName(jsonFilePath));
+
+    // --- Binary part (file) ---
+    // サーバが「bin」というフォーム名で受け取る想定
+    var binStream = File.OpenRead(binaryFilePath);
+    var binContent = new StreamContent(binStream);
+    binContent.Headers.ContentType = new MediaTypeHeaderValue("application/octet-stream");
+    multipart.Add(binContent, name: "bin", fileName: Path.GetFileName(binaryFilePath));
+
+    req.Content = multipart;
+
+    using var resp = await http.SendAsync(req, HttpCompletionOption.ResponseHeadersRead, ct);
+    resp.EnsureSuccessStatusCode();
+}
+
+
 zoom: {
       pan: {
         enabled: true,
