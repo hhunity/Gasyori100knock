@@ -1,3 +1,149 @@
+using System;
+using System.Net;
+using System.Net.Http;
+using System.Net.Http.Headers;
+using System.Text;
+using System.Text.Json;
+using System.Text.Json.Serialization;
+using System.Threading;
+using System.Threading.Tasks;
+
+public sealed class JobClient
+{
+    private readonly HttpClient _http;
+    private readonly JsonSerializerOptions _json;
+
+    public JobClient(HttpClient http)
+    {
+        _http = http ?? throw new ArgumentNullException(nameof(http));
+        _json = new JsonSerializerOptions
+        {
+            PropertyNameCaseInsensitive = true,
+            DefaultIgnoreCondition = JsonIgnoreCondition.WhenWritingNull
+        };
+    }
+
+    public async Task<string> SubmitJobAsync(object requestBody, CancellationToken ct)
+    {
+        // requestBody は匿名型やDTOでOK（例: new { path="x", mode="y" }）
+        var json = JsonSerializer.Serialize(requestBody, _json);
+        using var content = new StringContent(json, Encoding.UTF8, "application/json");
+
+        using var resp = await _http.PostAsync("/jobs", content, ct);
+
+        // 202 を想定（サーバ実装によっては 200 の場合もあるので柔軟に）
+        if (resp.StatusCode != HttpStatusCode.Accepted && resp.StatusCode != HttpStatusCode.OK)
+        {
+            var err = await resp.Content.ReadAsStringAsync(ct);
+            throw new HttpRequestException($"Submit failed: {(int)resp.StatusCode} {resp.ReasonPhrase}\n{err}");
+        }
+
+        // まず Location ヘッダに job URL がある場合はそれを使う
+        if (resp.Headers.Location is Uri loc)
+        {
+            // /jobs/job-123 のような相対でもOK。job_id は末尾から取り出し
+            var segments = loc.ToString().TrimEnd('/').Split('/');
+            return segments[^1];
+        }
+
+        // ない場合は JSON から job_id を読む
+        var body = await resp.Content.ReadAsStringAsync(ct);
+        var submit = JsonSerializer.Deserialize<JobSubmitResponse>(body, _json)
+                     ?? throw new InvalidOperationException("Invalid submit response JSON.");
+
+        if (string.IsNullOrWhiteSpace(submit.JobId))
+            throw new InvalidOperationException("Response has no job_id.");
+
+        return submit.JobId;
+    }
+
+    public async Task<JobStatusResponse> GetStatusAsync(string jobId, CancellationToken ct)
+    {
+        using var resp = await _http.GetAsync($"/jobs/{Uri.EscapeDataString(jobId)}", ct);
+        if (resp.StatusCode == HttpStatusCode.NotFound)
+            throw new InvalidOperationException($"Job not found: {jobId}");
+
+        resp.EnsureSuccessStatusCode();
+
+        var body = await resp.Content.ReadAsStringAsync(ct);
+        return JsonSerializer.Deserialize<JobStatusResponse>(body, _json)
+               ?? throw new InvalidOperationException("Invalid status response JSON.");
+    }
+
+    public async Task<string> GetResultJsonAsync(string jobId, CancellationToken ct)
+    {
+        using var resp = await _http.GetAsync($"/jobs/{Uri.EscapeDataString(jobId)}/result", ct);
+
+        // 未完了を 409 で返す設計の場合
+        if (resp.StatusCode == HttpStatusCode.Conflict)
+            throw new InvalidOperationException("Result not ready yet.");
+
+        resp.EnsureSuccessStatusCode();
+        return await resp.Content.ReadAsStringAsync(ct);
+    }
+
+    /// <summary>
+    /// 状態を一定間隔でポーリングして、done/failed まで待つ。
+    /// </summary>
+    public async Task<JobStatusResponse> WaitForCompletionAsync(
+        string jobId,
+        TimeSpan pollInterval,
+        TimeSpan? timeout,
+        IProgress<JobStatusResponse>? progress,
+        CancellationToken ct)
+    {
+        using var timeoutCts = timeout.HasValue
+            ? CancellationTokenSource.CreateLinkedTokenSource(ct)
+            : null;
+
+        if (timeoutCts is not null)
+            timeoutCts.CancelAfter(timeout.Value);
+
+        var token = timeoutCts?.Token ?? ct;
+
+        while (true)
+        {
+            token.ThrowIfCancellationRequested();
+
+            var st = await GetStatusAsync(jobId, token);
+            progress?.Report(st);
+
+            if (string.Equals(st.Status, "done", StringComparison.OrdinalIgnoreCase) ||
+                string.Equals(st.Status, "failed", StringComparison.OrdinalIgnoreCase))
+            {
+                return st;
+            }
+
+            // 429 (Rate limit) や transient error 対策で、ここでバックオフを入れるのも有効
+            await Task.Delay(pollInterval, token);
+        }
+    }
+
+    private sealed class JobSubmitResponse
+    {
+        [JsonPropertyName("job_id")]
+        public string? JobId { get; set; }
+
+        [JsonPropertyName("status")]
+        public string? Status { get; set; }
+    }
+}
+
+public sealed class JobStatusResponse
+{
+    [JsonPropertyName("job_id")]
+    public string? JobId { get; set; }
+
+    [JsonPropertyName("status")]
+    public string? Status { get; set; }   // queued|running|done|failed
+
+    [JsonPropertyName("progress")]
+    public int? Progress { get; set; }    // 0..100 (任意)
+
+    [JsonPropertyName("error")]
+    public string? Error { get; set; }    // failed のとき
+}
+
 
 #include "httplib.h"
 #include <fstream>
