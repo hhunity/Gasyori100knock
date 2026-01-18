@@ -1,4 +1,98 @@
 using System;
+using System.IO;
+using System.Net.Http;
+using System.Net.Http.Headers;
+using System.Threading.Tasks;
+
+class Program
+{
+    static async Task Main()
+    {
+        var url = "http://127.0.0.1:8080/upload";
+        var tiffPath = @"C:\temp\image.tif";
+
+        using var client = new HttpClient();
+
+        await using var fs = File.OpenRead(tiffPath);
+        using var fileContent = new StreamContent(fs);
+        fileContent.Headers.ContentType = new MediaTypeHeaderValue("image/tiff");
+
+        using var form = new MultipartFormDataContent();
+        // name="file" は C++ 側でこのキー名で受け取る
+        form.Add(fileContent, "file", Path.GetFileName(tiffPath));
+
+        // 追加のメタデータ（任意）
+        form.Add(new StringContent("cameraA"), "source");
+        form.Add(new StringContent(DateTime.UtcNow.ToString("o")), "timestamp");
+
+        using var resp = await client.PostAsync(url, form);
+        var body = await resp.Content.ReadAsStringAsync();
+
+        Console.WriteLine($"{(int)resp.StatusCode} {resp.StatusCode}");
+        Console.WriteLine(body);
+    }
+}
+
+#include <httplib.h>
+#include <filesystem>
+#include <fstream>
+#include <iostream>
+
+static bool write_all_bytes(const std::string& path, const std::string& data) {
+    std::ofstream ofs(path, std::ios::binary);
+    if (!ofs) return false;
+    ofs.write(data.data(), static_cast<std::streamsize>(data.size()));
+    return static_cast<bool>(ofs);
+}
+
+int main() {
+    httplib::Server svr;
+
+    svr.Post("/upload", [](const httplib::Request& req, httplib::Response& res) {
+        // 1) テキストフィールド（任意）
+        // multipart の場合、cpp-httplib では req.get_param_value で取れることが多いです。
+        // 取れない構成もあるので、その場合は JSON を別エンドポイントにするか、
+        // あるいは file と metadata を両方 "files" として送る方式に寄せます。
+        std::string source;
+        if (req.has_param("source")) source = req.get_param_value("source");
+
+        // 2) ファイル受信
+        auto it = req.files.find("file");
+        if (it == req.files.end()) {
+            res.status = 400;
+            res.set_content("missing multipart field: file", "text/plain");
+            return;
+        }
+
+        const auto& f = it->second; // httplib::MultipartFormData
+        // f.filename, f.content_type, f.content が使える
+        if (f.content_type != "image/tiff" && f.content_type != "application/octet-stream") {
+            // クライアントによっては octet-stream になることがあります
+            // 厳密にしたいなら拡張子/マジックナンバー検査も追加
+        }
+
+        std::filesystem::create_directories("uploads");
+        const std::string out_path = std::string("uploads/") + f.filename;
+
+        if (!write_all_bytes(out_path, f.content)) {
+            res.status = 500;
+            res.set_content("failed to save file", "text/plain");
+            return;
+        }
+
+        res.status = 200;
+        res.set_content("saved: " + out_path + " source=" + source, "text/plain");
+    });
+
+    std::cout << "listening on :8080\n";
+    svr.listen("0.0.0.0", 8080);
+}
+
+
+
+
+
+using System;
 using System.Net;
 using System.Net.Http;
 using System.Net.Http.Headers;
