@@ -1,4 +1,300 @@
 
+// server.cpp
+#include <httplib.h>
+#include <nlohmann/json.hpp>
+
+#include <atomic>
+#include <condition_variable>
+#include <filesystem>
+#include <fstream>
+#include <mutex>
+#include <queue>
+#include <random>
+#include <string>
+#include <thread>
+#include <unordered_map>
+
+using nlohmann::json;
+namespace fs = std::filesystem;
+
+static std::string read_all_bytes(const fs::path& path) {
+    std::ifstream ifs(path, std::ios::binary);
+    if (!ifs) throw std::runtime_error("failed to open file for read");
+    std::string out((std::istreambuf_iterator<char>(ifs)), std::istreambuf_iterator<char>());
+    return out;
+}
+
+static void write_all_bytes(const fs::path& path, const std::string& data) {
+    std::ofstream ofs(path, std::ios::binary | std::ios::trunc);
+    if (!ofs) throw std::runtime_error("failed to open file for write");
+    ofs.write(data.data(), static_cast<std::streamsize>(data.size()));
+    if (!ofs) throw std::runtime_error("failed to write file");
+}
+
+// 簡易 jobId（32 hex）
+static std::string make_job_id() {
+    static thread_local std::mt19937_64 rng{std::random_device{}()};
+    static const char* hex = "0123456789abcdef";
+    std::string s;
+    s.reserve(32);
+    for (int i = 0; i < 32; ++i) {
+        s.push_back(hex[rng() & 0xF]);
+    }
+    return s;
+}
+
+enum class JobState { Queued, Running, Done, Failed, Canceled };
+
+static const char* to_string(JobState st) {
+    switch (st) {
+        case JobState::Queued:   return "queued";
+        case JobState::Running:  return "running";
+        case JobState::Done:     return "done";
+        case JobState::Failed:   return "failed";
+        case JobState::Canceled: return "canceled";
+        default:                 return "unknown";
+    }
+}
+
+struct JobInfo {
+    JobState state = JobState::Queued;
+    std::string error;
+    fs::path input_path;
+    fs::path result_path;
+    std::atomic<bool> cancel{false};
+};
+
+class JobManager {
+public:
+    explicit JobManager(fs::path base_dir)
+        : base_dir_(std::move(base_dir)), worker_(&JobManager::worker_loop, this) {
+        fs::create_directories(base_dir_);
+    }
+
+    ~JobManager() {
+        stop_ = true;
+        cv_.notify_all();
+        if (worker_.joinable()) worker_.join();
+    }
+
+    std::string enqueue_tiff(const std::string& filename, const std::string& bytes) {
+        const std::string job_id = make_job_id();
+        const fs::path job_dir = base_dir_ / job_id;
+        fs::create_directories(job_dir);
+
+        // Explorer/COM Surrogate ロックを避けるため、固定名でも job 毎にフォルダ分離
+        fs::path input = job_dir / "input.tif";
+        fs::path result = job_dir / "result.tif";
+
+        write_all_bytes(input, bytes);
+
+        auto job = std::make_shared<JobInfo>();
+        job->state = JobState::Queued;
+        job->input_path = input;
+        job->result_path = result;
+
+        {
+            std::lock_guard<std::mutex> lk(mu_);
+            jobs_[job_id] = job;
+            q_.push(job_id);
+        }
+        cv_.notify_one();
+        return job_id;
+    }
+
+    json get_status_json(const std::string& job_id) {
+        auto job = get_job(job_id);
+        if (!job) return json{{"error", "not_found"}};
+
+        json j;
+        j["jobId"] = job_id;
+        j["state"] = to_string(job->state);
+        if (!job->error.empty()) j["error"] = job->error;
+        return j;
+    }
+
+    // done のときだけ result を返す。not found / not ready も判定。
+    bool try_get_result(const std::string& job_id, fs::path& out_path, JobState& out_state) {
+        auto job = get_job(job_id);
+        if (!job) return false;
+        out_state = job->state;
+        out_path = job->result_path;
+        return true;
+    }
+
+    bool cancel_job(const std::string& job_id) {
+        auto job = get_job(job_id);
+        if (!job) return false;
+
+        // queued/running のみキャンセル受付
+        if (job->state == JobState::Queued || job->state == JobState::Running) {
+            job->cancel.store(true, std::memory_order_relaxed);
+            return true;
+        }
+        return false;
+    }
+
+private:
+    std::shared_ptr<JobInfo> get_job(const std::string& job_id) {
+        std::lock_guard<std::mutex> lk(mu_);
+        auto it = jobs_.find(job_id);
+        if (it == jobs_.end()) return {};
+        return it->second;
+    }
+
+    void worker_loop() {
+        while (!stop_) {
+            std::string job_id;
+
+            {
+                std::unique_lock<std::mutex> lk(mu_);
+                cv_.wait(lk, [&]{ return stop_ || !q_.empty(); });
+                if (stop_) break;
+                job_id = q_.front();
+                q_.pop();
+            }
+
+            auto job = get_job(job_id);
+            if (!job) continue;
+
+            if (job->cancel.load(std::memory_order_relaxed)) {
+                job->state = JobState::Canceled;
+                continue;
+            }
+
+            job->state = JobState::Running;
+
+            try {
+                // ここに画像処理を入れる（例では “入力をそのまま出力”）
+                // 大きい処理なら途中で job->cancel を見て協調的に中断する。
+                const std::string in_bytes = read_all_bytes(job->input_path);
+
+                if (job->cancel.load(std::memory_order_relaxed)) {
+                    job->state = JobState::Canceled;
+                    continue;
+                }
+
+                write_all_bytes(job->result_path, in_bytes);
+
+                job->state = JobState::Done;
+            } catch (const std::exception& e) {
+                job->error = e.what();
+                job->state = JobState::Failed;
+            }
+        }
+    }
+
+private:
+    fs::path base_dir_;
+    std::mutex mu_;
+    std::condition_variable cv_;
+    std::queue<std::string> q_;
+    std::unordered_map<std::string, std::shared_ptr<JobInfo>> jobs_;
+    std::atomic<bool> stop_{false};
+    std::thread worker_;
+};
+
+int main() {
+    httplib::Server svr;
+    JobManager jm("jobs");
+
+    // POST /jobs : TIFF を受けて jobId を返す
+    svr.Post("/jobs", [&](const httplib::Request& req, httplib::Response& res) {
+        auto it = req.files.find("file");
+        if (it == req.files.end()) {
+            res.status = 400;
+            res.set_content(R"({"error":"missing file field 'file'"})", "application/json");
+            return;
+        }
+
+        const auto& f = it->second;
+        // content_type は環境で変わるので厳密固定しないのが安全
+        // if (f.content_type != "image/tiff" && f.content_type != "application/octet-stream") ...
+
+        const std::string job_id = jm.enqueue_tiff(f.filename, f.content);
+
+        json out{
+            {"jobId", job_id},
+            {"statusUrl", "/jobs/" + job_id},
+            {"resultUrl", "/results/" + job_id}
+        };
+
+        res.status = 202; // Accepted
+        res.set_content(out.dump(), "application/json");
+    });
+
+    // GET /jobs/{id} : 状態確認
+    svr.Get(R"(/jobs/([0-9a-fA-F]{32}))", [&](const httplib::Request& req, httplib::Response& res) {
+        const std::string job_id = req.matches[1];
+
+        json st = jm.get_status_json(job_id);
+        if (st.contains("error") && st["error"] == "not_found") {
+            res.status = 404;
+            res.set_content(st.dump(), "application/json");
+            return;
+        }
+
+        res.status = 200;
+        res.set_content(st.dump(), "application/json");
+    });
+
+    // GET /results/{id} : done のとき TIFF を返す
+    svr.Get(R"(/results/([0-9a-fA-F]{32}))", [&](const httplib::Request& req, httplib::Response& res) {
+        const std::string job_id = req.matches[1];
+
+        fs::path result_path;
+        JobState st{};
+        if (!jm.try_get_result(job_id, result_path, st)) {
+            res.status = 404;
+            res.set_content(R"({"error":"not_found"})", "application/json");
+            return;
+        }
+
+        if (st == JobState::Queued || st == JobState::Running) {
+            res.status = 409; // Conflict (not ready)
+            res.set_content(R"({"error":"not_ready"})", "application/json");
+            return;
+        }
+        if (st == JobState::Canceled) {
+            res.status = 410; // Gone
+            res.set_content(R"({"error":"canceled"})", "application/json");
+            return;
+        }
+        if (st == JobState::Failed) {
+            res.status = 500;
+            res.set_content(R"({"error":"failed"})", "application/json");
+            return;
+        }
+
+        try {
+            std::string bytes = read_all_bytes(result_path);
+            res.set_header("Content-Disposition", "attachment; filename=\"result.tif\"");
+            res.set_content(bytes, "image/tiff");
+            res.status = 200;
+        } catch (...) {
+            res.status = 500;
+            res.set_content(R"({"error":"result_read_failed"})", "application/json");
+        }
+    });
+
+    // 任意：DELETE /jobs/{id} : キャンセル
+    svr.Delete(R"(/jobs/([0-9a-fA-F]{32}))", [&](const httplib::Request& req, httplib::Response& res) {
+        const std::string job_id = req.matches[1];
+        const bool ok = jm.cancel_job(job_id);
+        if (!ok) {
+            res.status = 404;
+            res.set_content(R"({"error":"not_found_or_not_cancelable"})", "application/json");
+            return;
+        }
+        res.status = 200;
+        res.set_content(R"({"ok":true})", "application/json");
+    });
+
+    // 起動
+    svr.listen("0.0.0.0", 8080);
+}
+
+
 auto dump_request = [](const httplib::Request& req) {
   std::cerr << "---- HTTP Request ----\n";
   std::cerr << req.method << " " << req.path << "\n";
