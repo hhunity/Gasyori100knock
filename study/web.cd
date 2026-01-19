@@ -2,6 +2,102 @@ using System;
 using System.IO;
 using System.Net.Http;
 using System.Net.Http.Headers;
+using System.Text.Json;
+using System.Threading.Tasks;
+
+public class JobResponse
+{
+    public string jobId { get; set; } = "";
+    public string statusUrl { get; set; } = "";
+    public string resultUrl { get; set; } = "";
+}
+
+public class JobStatus
+{
+    public string jobId { get; set; } = "";
+    public string state { get; set; } = "";
+    public string? error { get; set; }
+}
+
+class Program
+{
+    static async Task Main()
+    {
+        var baseUrl = "http://127.0.0.1:8080";
+        var inputTif = @"C:\temp\image.tif";
+        var outputTif = @"C:\temp\result.tif";
+
+        using var client = new HttpClient();
+
+        // 1) POST /jobs
+        JobResponse job = await CreateJobAsync(client, baseUrl, inputTif);
+        Console.WriteLine($"jobId={job.jobId}");
+
+        // 2) GET /jobs/{id} をポーリング
+        while (true)
+        {
+            var st = await GetStatusAsync(client, baseUrl, job.jobId);
+            Console.WriteLine($"state={st.state}");
+
+            if (st.state == "done") break;
+            if (st.state == "failed") throw new Exception($"job failed: {st.error}");
+            if (st.state == "canceled") throw new Exception("job canceled");
+
+            await Task.Delay(1000);
+        }
+
+        // 3) GET /results/{id} で TIFF をダウンロード
+        await DownloadResultAsync(client, baseUrl, job.jobId, outputTif);
+        Console.WriteLine($"saved: {outputTif}");
+    }
+
+    static async Task<JobResponse> CreateJobAsync(HttpClient client, string baseUrl, string tifPath)
+    {
+        await using var fs = File.OpenRead(tifPath);
+        using var fileContent = new StreamContent(fs);
+        fileContent.Headers.ContentType = new MediaTypeHeaderValue("image/tiff");
+
+        using var form = new MultipartFormDataContent();
+        form.Add(fileContent, "file", Path.GetFileName(tifPath));
+
+        using var resp = await client.PostAsync($"{baseUrl}/jobs", form);
+        resp.EnsureSuccessStatusCode();
+
+        var json = await resp.Content.ReadAsStringAsync();
+        return JsonSerializer.Deserialize<JobResponse>(json) ?? throw new Exception("bad response");
+    }
+
+    static async Task<JobStatus> GetStatusAsync(HttpClient client, string baseUrl, string jobId)
+    {
+        using var resp = await client.GetAsync($"{baseUrl}/jobs/{jobId}");
+        resp.EnsureSuccessStatusCode();
+
+        var json = await resp.Content.ReadAsStringAsync();
+        return JsonSerializer.Deserialize<JobStatus>(json) ?? throw new Exception("bad status");
+    }
+
+    static async Task DownloadResultAsync(HttpClient client, string baseUrl, string jobId, string outPath)
+    {
+        using var resp = await client.GetAsync($"{baseUrl}/results/{jobId}");
+        resp.EnsureSuccessStatusCode();
+
+        var bytes = await resp.Content.ReadAsByteArrayAsync();
+        File.WriteAllBytes(outPath, bytes);
+    }
+
+    // 任意：キャンセル
+    static async Task CancelJobAsync(HttpClient client, string baseUrl, string jobId)
+    {
+        using var req = new HttpRequestMessage(HttpMethod.Delete, $"{baseUrl}/jobs/{jobId}");
+        using var resp = await client.SendAsync(req);
+        // 200: canceled accepted, 404: not found/not cancelable
+    }
+}
+
+using System;
+using System.IO;
+using System.Net.Http;
+using System.Net.Http.Headers;
 using System.Threading.Tasks;
 
 class Program
