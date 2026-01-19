@@ -1,3 +1,173 @@
+// mjpeg_server.cpp
+#include <httplib.h>
+#include <opencv2/opencv.hpp>
+
+#include <atomic>
+#include <condition_variable>
+#include <cstdint>
+#include <mutex>
+#include <thread>
+#include <vector>
+#include <string>
+#include <chrono>
+#include <memory>
+
+struct JpegFrame {
+  uint64_t seq = 0;
+  std::vector<uint8_t> bytes;
+};
+
+class LatestFrameStore {
+public:
+  void update(std::vector<uint8_t>&& jpeg) {
+    std::lock_guard<std::mutex> lk(m_);
+    frame_.seq++;
+    frame_.bytes = std::move(jpeg);
+    cv_.notify_all();
+  }
+
+  // last_seq より新しいフレームが来るまで待つ。timeoutは適当に。
+  std::shared_ptr<JpegFrame> wait_next(uint64_t last_seq,
+                                       std::chrono::milliseconds timeout) {
+    std::unique_lock<std::mutex> lk(m_);
+    cv_.wait_for(lk, timeout, [&] { return frame_.seq > last_seq; });
+    if (frame_.seq <= last_seq || frame_.bytes.empty()) return nullptr;
+
+    auto out = std::make_shared<JpegFrame>();
+    out->seq = frame_.seq;
+    out->bytes = frame_.bytes; // コピー（ここを最適化したければ共有バッファ化）
+    return out;
+  }
+
+  std::shared_ptr<JpegFrame> latest() {
+    std::lock_guard<std::mutex> lk(m_);
+    if (frame_.bytes.empty()) return nullptr;
+    auto out = std::make_shared<JpegFrame>();
+    out->seq = frame_.seq;
+    out->bytes = frame_.bytes;
+    return out;
+  }
+
+private:
+  std::mutex m_;
+  std::condition_variable cv_;
+  JpegFrame frame_;
+};
+
+int main() {
+  LatestFrameStore store;
+  std::atomic<bool> stop{false};
+
+  // --- Capture thread (OpenCV例) ---
+  std::thread cap([&] {
+    cv::VideoCapture cam(0); // 適宜デバイス番号やURLを変更
+    if (!cam.isOpened()) {
+      fprintf(stderr, "Camera open failed\n");
+      return;
+    }
+
+    // 任意：解像度/fpsを指定（効かないカメラもあります）
+    cam.set(cv::CAP_PROP_FRAME_WIDTH, 1280);
+    cam.set(cv::CAP_PROP_FRAME_HEIGHT, 720);
+    cam.set(cv::CAP_PROP_FPS, 30);
+
+    std::vector<int> params = {cv::IMWRITE_JPEG_QUALITY, 80};
+
+    while (!stop.load()) {
+      cv::Mat frame;
+      if (!cam.read(frame) || frame.empty()) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+        continue;
+      }
+
+      std::vector<uint8_t> jpeg;
+      // BGR->JPEG（ここが重い場合が多い）
+      if (cv::imencode(".jpg", frame, jpeg, params)) {
+        store.update(std::move(jpeg));
+      }
+
+      // 取りすぎ防止（カメラが際限なく出る場合）
+      std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
+  });
+
+  // --- HTTP server ---
+  httplib::Server svr;
+
+  // スレッド数（同時接続を想定するなら増やす）
+  svr.new_task_queue = [] { return new httplib::ThreadPool(8); };
+
+  // 1枚取得用（デバッグに便利）
+  svr.Get("/snapshot.jpg", [&](const httplib::Request&, httplib::Response& res) {
+    auto f = store.latest();
+    if (!f) {
+      res.status = 503;
+      res.set_content("no frame", "text/plain");
+      return;
+    }
+    res.set_header("Cache-Control", "no-store, no-cache, must-revalidate");
+    res.set_content(reinterpret_cast<const char*>(f->bytes.data()),
+                    f->bytes.size(),
+                    "image/jpeg");
+  });
+
+  // MJPEGストリーム本体
+  svr.Get("/mjpeg", [&](const httplib::Request&, httplib::Response& res) {
+    res.set_header("Cache-Control", "no-store, no-cache, must-revalidate");
+    res.set_header("Pragma", "no-cache");
+    res.set_header("Connection", "close");
+
+    res.set_chunked_content_provider(
+      "multipart/x-mixed-replace; boundary=frame",
+      [&](size_t /*offset*/, httplib::DataSink& sink) {
+        uint64_t last = 0;
+
+        while (sink.is_writable()) {
+          auto f = store.wait_next(last, std::chrono::milliseconds(2000));
+          if (!f) continue;              // タイムアウトは無視して待ち続ける
+          last = f->seq;
+
+          std::string header =
+            "--frame\r\n"
+            "Content-Type: image/jpeg\r\n"
+            "Content-Length: " + std::to_string(f->bytes.size()) + "\r\n\r\n";
+
+          if (!sink.write(header.data(), header.size())) break;
+          if (!sink.write(reinterpret_cast<const char*>(f->bytes.data()),
+                          f->bytes.size())) break;
+          if (!sink.write("\r\n", 2)) break;
+        }
+
+        sink.done();
+        return true; // この接続の送信を終了
+      }
+    );
+  });
+
+  // HTMLデモ（ブラウザ確認用）
+  svr.Get("/", [&](const httplib::Request&, httplib::Response& res) {
+    const char* html =
+      "<html><body>"
+      "<h3>MJPEG</h3>"
+      "<img src='/mjpeg' />"
+      "<p><a href='/snapshot.jpg'>snapshot</a></p>"
+      "</body></html>";
+    res.set_content(html, "text/html");
+  });
+
+  printf("Listening on http://0.0.0.0:8080\n");
+  svr.listen("0.0.0.0", 8080);
+
+  stop = true;
+  if (cap.joinable()) cap.join();
+  return 0;
+}
+
+
+
+
+
+m
 
 // server.cpp
 #include <httplib.h>
