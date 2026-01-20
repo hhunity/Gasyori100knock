@@ -2,830 +2,212 @@ using System;
 using System.IO;
 using System.Net.Http;
 using System.Net.Http.Headers;
-using System.Text.Json;
+using System.Text;
+using System.Threading;
 using System.Threading.Tasks;
 
-public class JobResponse
+public sealed class SseClient
 {
-    public string jobId { get; set; } = "";
-    public string statusUrl { get; set; } = "";
-    public string resultUrl { get; set; } = "";
-}
+    private readonly HttpClient _http;
 
-public class JobStatus
-{
-    public string jobId { get; set; } = "";
-    public string state { get; set; } = "";
-    public string? error { get; set; }
-}
+    public SseClient(HttpClient http) => _http = http;
 
-class Program
-{
-    static async Task Main()
+    // onMessage: (eventName, id, data)
+    public async Task SubscribeAsync(
+        Uri uri,
+        Action<string?, string?, string?> onMessage,
+        CancellationToken ct)
     {
-        var baseUrl = "http://127.0.0.1:8080";
-        var inputTif = @"C:\temp\image.tif";
-        var outputTif = @"C:\temp\result.tif";
+        using var req = new HttpRequestMessage(HttpMethod.Get, uri);
+        req.Headers.Accept.Add(new MediaTypeWithQualityHeaderValue("text/event-stream"));
 
-        using var client = new HttpClient();
+        using var res = await _http.SendAsync(req, HttpCompletionOption.ResponseHeadersRead, ct);
+        res.EnsureSuccessStatusCode();
 
-        // 1) POST /jobs
-        JobResponse job = await CreateJobAsync(client, baseUrl, inputTif);
-        Console.WriteLine($"jobId={job.jobId}");
+        await using var stream = await res.Content.ReadAsStreamAsync(ct);
+        using var reader = new StreamReader(stream, Encoding.UTF8);
 
-        // 2) GET /jobs/{id} をポーリング
-        while (true)
+        string? eventName = null;
+        string? eventId = null;
+        var data = new StringBuilder();
+
+        while (!reader.EndOfStream && !ct.IsCancellationRequested)
         {
-            var st = await GetStatusAsync(client, baseUrl, job.jobId);
-            Console.WriteLine($"state={st.state}");
+            var line = await reader.ReadLineAsync();
+            if (line == null) break;
 
-            if (st.state == "done") break;
-            if (st.state == "failed") throw new Exception($"job failed: {st.error}");
-            if (st.state == "canceled") throw new Exception("job canceled");
+            // イベント終端（空行）
+            if (line.Length == 0)
+            {
+                if (eventName != null || eventId != null || data.Length > 0)
+                {
+                    var payload = data.Length > 0 ? data.ToString().TrimEnd('\n') : null;
+                    onMessage(eventName, eventId, payload);
 
-            await Task.Delay(1000);
+                    eventName = null;
+                    eventId = null;
+                    data.Clear();
+                }
+                continue;
+            }
+
+            // コメント行(: pingなど)
+            if (line.StartsWith(":", StringComparison.Ordinal))
+                continue;
+
+            var idx = line.IndexOf(':');
+            string field, value;
+            if (idx < 0)
+            {
+                field = line;
+                value = "";
+            }
+            else
+            {
+                field = line.Substring(0, idx);
+                value = line.Substring(idx + 1);
+                if (value.StartsWith(" ", StringComparison.Ordinal)) value = value.Substring(1);
+            }
+
+            switch (field)
+            {
+                case "event": eventName = value; break;
+                case "id":    eventId = value; break;
+                case "data":  data.Append(value).Append('\n'); break;
+            }
         }
-
-        // 3) GET /results/{id} で TIFF をダウンロード
-        await DownloadResultAsync(client, baseUrl, job.jobId, outputTif);
-        Console.WriteLine($"saved: {outputTif}");
-    }
-
-    static async Task<JobResponse> CreateJobAsync(HttpClient client, string baseUrl, string tifPath)
-    {
-        await using var fs = File.OpenRead(tifPath);
-        using var fileContent = new StreamContent(fs);
-        fileContent.Headers.ContentType = new MediaTypeHeaderValue("image/tiff");
-
-        using var form = new MultipartFormDataContent();
-        form.Add(fileContent, "file", Path.GetFileName(tifPath));
-
-        using var resp = await client.PostAsync($"{baseUrl}/jobs", form);
-        resp.EnsureSuccessStatusCode();
-
-        var json = await resp.Content.ReadAsStringAsync();
-        return JsonSerializer.Deserialize<JobResponse>(json) ?? throw new Exception("bad response");
-    }
-
-    static async Task<JobStatus> GetStatusAsync(HttpClient client, string baseUrl, string jobId)
-    {
-        using var resp = await client.GetAsync($"{baseUrl}/jobs/{jobId}");
-        resp.EnsureSuccessStatusCode();
-
-        var json = await resp.Content.ReadAsStringAsync();
-        return JsonSerializer.Deserialize<JobStatus>(json) ?? throw new Exception("bad status");
-    }
-
-    static async Task DownloadResultAsync(HttpClient client, string baseUrl, string jobId, string outPath)
-    {
-        using var resp = await client.GetAsync($"{baseUrl}/results/{jobId}");
-        resp.EnsureSuccessStatusCode();
-
-        var bytes = await resp.Content.ReadAsByteArrayAsync();
-        File.WriteAllBytes(outPath, bytes);
-    }
-
-    // 任意：キャンセル
-    static async Task CancelJobAsync(HttpClient client, string baseUrl, string jobId)
-    {
-        using var req = new HttpRequestMessage(HttpMethod.Delete, $"{baseUrl}/jobs/{jobId}");
-        using var resp = await client.SendAsync(req);
-        // 200: canceled accepted, 404: not found/not cancelable
     }
 }
-
-using System;
-using System.IO;
-using System.Net.Http;
-using System.Net.Http.Headers;
-using System.Threading.Tasks;
-
-class Program
-{
-    static async Task Main()
-    {
-        var url = "http://127.0.0.1:8080/upload";
-        var tiffPath = @"C:\temp\image.tif";
-
-        using var client = new HttpClient();
-
-        await using var fs = File.OpenRead(tiffPath);
-        using var fileContent = new StreamContent(fs);
-        fileContent.Headers.ContentType = new MediaTypeHeaderValue("image/tiff");
-
-        using var form = new MultipartFormDataContent();
-        // name="file" は C++ 側でこのキー名で受け取る
-        form.Add(fileContent, "file", Path.GetFileName(tiffPath));
-
-        // 追加のメタデータ（任意）
-        form.Add(new StringContent("cameraA"), "source");
-        form.Add(new StringContent(DateTime.UtcNow.ToString("o")), "timestamp");
-
-        using var resp = await client.PostAsync(url, form);
-        var body = await resp.Content.ReadAsStringAsync();
-
-        Console.WriteLine($"{(int)resp.StatusCode} {resp.StatusCode}");
-        Console.WriteLine(body);
-    }
-}
-
-#include <httplib.h>
-#include <filesystem>
-#include <fstream>
-#include <iostream>
-
-static bool write_all_bytes(const std::string& path, const std::string& data) {
-    std::ofstream ofs(path, std::ios::binary);
-    if (!ofs) return false;
-    ofs.write(data.data(), static_cast<std::streamsize>(data.size()));
-    return static_cast<bool>(ofs);
-}
-
-int main() {
-    httplib::Server svr;
-
-    svr.Post("/upload", [](const httplib::Request& req, httplib::Response& res) {
-        // 1) テキストフィールド（任意）
-        // multipart の場合、cpp-httplib では req.get_param_value で取れることが多いです。
-        // 取れない構成もあるので、その場合は JSON を別エンドポイントにするか、
-        // あるいは file と metadata を両方 "files" として送る方式に寄せます。
-        std::string source;
-        if (req.has_param("source")) source = req.get_param_value("source");
-
-        // 2) ファイル受信
-        auto it = req.files.find("file");
-        if (it == req.files.end()) {
-            res.status = 400;
-            res.set_content("missing multipart field: file", "text/plain");
-            return;
-        }
-
-        const auto& f = it->second; // httplib::MultipartFormData
-        // f.filename, f.content_type, f.content が使える
-        if (f.content_type != "image/tiff" && f.content_type != "application/octet-stream") {
-            // クライアントによっては octet-stream になることがあります
-            // 厳密にしたいなら拡張子/マジックナンバー検査も追加
-        }
-
-        std::filesystem::create_directories("uploads");
-        const std::string out_path = std::string("uploads/") + f.filename;
-
-        if (!write_all_bytes(out_path, f.content)) {
-            res.status = 500;
-            res.set_content("failed to save file", "text/plain");
-            return;
-        }
-
-        res.status = 200;
-        res.set_content("saved: " + out_path + " source=" + source, "text/plain");
-    });
-
-    std::cout << "listening on :8080\n";
-    svr.listen("0.0.0.0", 8080);
-}
-
-
-
 
 
 using System;
-using System.Net;
 using System.Net.Http;
-using System.Net.Http.Headers;
 using System.Text;
 using System.Text.Json;
-using System.Text.Json.Serialization;
 using System.Threading;
 using System.Threading.Tasks;
 
 public sealed class JobClient
 {
     private readonly HttpClient _http;
-    private readonly JsonSerializerOptions _json;
+    private readonly Uri _sseUri;
 
-    public JobClient(HttpClient http)
+    public JobClient(HttpClient http, Uri sseUri)
     {
-        _http = http ?? throw new ArgumentNullException(nameof(http));
-        _json = new JsonSerializerOptions
-        {
-            PropertyNameCaseInsensitive = true,
-            DefaultIgnoreCondition = JsonIgnoreCondition.WhenWritingNull
-        };
+        _http = http;
+        _sseUri = sseUri;
     }
 
-    public async Task<string> SubmitJobAsync(object requestBody, CancellationToken ct)
+    public async Task<string> PutAndWaitCompleteAsync(
+        Uri putUri,
+        object putJsonBody,
+        TimeSpan timeout,
+        CancellationToken externalCt)
     {
-        // requestBody は匿名型やDTOでOK（例: new { path="x", mode="y" }）
-        var json = JsonSerializer.Serialize(requestBody, _json);
-        using var content = new StringContent(json, Encoding.UTF8, "application/json");
+        using var linkedCts = CancellationTokenSource.CreateLinkedTokenSource(externalCt);
+        linkedCts.CancelAfter(timeout);
+        var ct = linkedCts.Token;
 
-        using var resp = await _http.PostAsync("/jobs", content, ct);
+        var sse = new SseClient(_http);
 
-        // 202 を想定（サーバ実装によっては 200 の場合もあるので柔軟に）
-        if (resp.StatusCode != HttpStatusCode.Accepted && resp.StatusCode != HttpStatusCode.OK)
+        // jobId -> 完了待ち
+        string? targetJobId = null;
+
+        var tcs = new TaskCompletionSource<string>(TaskCreationOptions.RunContinuationsAsynchronously);
+
+        // 1) SSE購読開始（先に張る：取りこぼし防止）
+        var sseTask = sse.SubscribeAsync(_sseUri, (ev, id, data) =>
         {
-            var err = await resp.Content.ReadAsStringAsync(ct);
-            throw new HttpRequestException($"Submit failed: {(int)resp.StatusCode} {resp.ReasonPhrase}\n{err}");
-        }
+            if (data == null) return;
 
-        // まず Location ヘッダに job URL がある場合はそれを使う
-        if (resp.Headers.Location is Uri loc)
-        {
-            // /jobs/job-123 のような相対でもOK。job_id は末尾から取り出し
-            var segments = loc.ToString().TrimEnd('/').Split('/');
-            return segments[^1];
-        }
-
-        // ない場合は JSON から job_id を読む
-        var body = await resp.Content.ReadAsStringAsync(ct);
-        var submit = JsonSerializer.Deserialize<JobSubmitResponse>(body, _json)
-                     ?? throw new InvalidOperationException("Invalid submit response JSON.");
-
-        if (string.IsNullOrWhiteSpace(submit.JobId))
-            throw new InvalidOperationException("Response has no job_id.");
-
-        return submit.JobId;
-    }
-
-    public async Task<JobStatusResponse> GetStatusAsync(string jobId, CancellationToken ct)
-    {
-        using var resp = await _http.GetAsync($"/jobs/{Uri.EscapeDataString(jobId)}", ct);
-        if (resp.StatusCode == HttpStatusCode.NotFound)
-            throw new InvalidOperationException($"Job not found: {jobId}");
-
-        resp.EnsureSuccessStatusCode();
-
-        var body = await resp.Content.ReadAsStringAsync(ct);
-        return JsonSerializer.Deserialize<JobStatusResponse>(body, _json)
-               ?? throw new InvalidOperationException("Invalid status response JSON.");
-    }
-
-    public async Task<string> GetResultJsonAsync(string jobId, CancellationToken ct)
-    {
-        using var resp = await _http.GetAsync($"/jobs/{Uri.EscapeDataString(jobId)}/result", ct);
-
-        // 未完了を 409 で返す設計の場合
-        if (resp.StatusCode == HttpStatusCode.Conflict)
-            throw new InvalidOperationException("Result not ready yet.");
-
-        resp.EnsureSuccessStatusCode();
-        return await resp.Content.ReadAsStringAsync(ct);
-    }
-
-    /// <summary>
-    /// 状態を一定間隔でポーリングして、done/failed まで待つ。
-    /// </summary>
-    public async Task<JobStatusResponse> WaitForCompletionAsync(
-        string jobId,
-        TimeSpan pollInterval,
-        TimeSpan? timeout,
-        IProgress<JobStatusResponse>? progress,
-        CancellationToken ct)
-    {
-        using var timeoutCts = timeout.HasValue
-            ? CancellationTokenSource.CreateLinkedTokenSource(ct)
-            : null;
-
-        if (timeoutCts is not null)
-            timeoutCts.CancelAfter(timeout.Value);
-
-        var token = timeoutCts?.Token ?? ct;
-
-        while (true)
-        {
-            token.ThrowIfCancellationRequested();
-
-            var st = await GetStatusAsync(jobId, token);
-            progress?.Report(st);
-
-            if (string.Equals(st.Status, "done", StringComparison.OrdinalIgnoreCase) ||
-                string.Equals(st.Status, "failed", StringComparison.OrdinalIgnoreCase))
+            try
             {
-                return st;
+                using var doc = JsonDocument.Parse(data);
+                var root = doc.RootElement;
+
+                // jobId がある前提
+                if (!root.TryGetProperty("jobId", out var jobIdEl)) return;
+                var jobId = jobIdEl.GetString();
+                if (string.IsNullOrEmpty(jobId)) return;
+
+                // まだ targetJobId 未確定なら無視（PUT応答で確定させる）
+                if (targetJobId == null) return;
+                if (!string.Equals(jobId, targetJobId, StringComparison.Ordinal)) return;
+
+                // stateを見てcompleteで解放
+                var state = root.TryGetProperty("state", out var s) ? s.GetString() : ev;
+
+                if (string.Equals(state, "complete", StringComparison.OrdinalIgnoreCase))
+                {
+                    var result = root.TryGetProperty("result", out var r) ? r.ToString() : data;
+                    tcs.TrySetResult(result ?? "OK");
+                }
+                else if (string.Equals(state, "error", StringComparison.OrdinalIgnoreCase))
+                {
+                    tcs.TrySetException(new InvalidOperationException($"Job error: {data}"));
+                }
+                // progress は無視 or UI更新に使う
+            }
+            catch
+            {
+                // JSONでない通知なら、必要に応じて無視/ログ
             }
 
-            // 429 (Rate limit) や transient error 対策で、ここでバックオフを入れるのも有効
-            await Task.Delay(pollInterval, token);
+        }, ct);
+
+        // 2) PUT送信（jobIdを取得）
+        var json = JsonSerializer.Serialize(putJsonBody);
+        using var content = new StringContent(json, Encoding.UTF8, "application/json");
+        using var res = await _http.PutAsync(putUri, content, ct);
+        res.EnsureSuccessStatusCode();
+
+        // サーバが { "jobId": "abc123" } を返す想定
+        var resBody = await res.Content.ReadAsStringAsync(ct);
+        targetJobId = ExtractJobId(resBody);
+        if (string.IsNullOrEmpty(targetJobId))
+            throw new InvalidOperationException($"PUT response has no jobId: {resBody}");
+
+        // 3) 完了通知を待つ（timeout/cancelで終了）
+        try
+        {
+            var result = await tcs.Task.WaitAsync(ct);
+            return result;
+        }
+        finally
+        {
+            // SSE停止（購読ループはctキャンセルで止まる）
+            // linkedCts.Dispose() で止まる
         }
     }
 
-    private sealed class JobSubmitResponse
+    private static string? ExtractJobId(string json)
     {
-        [JsonPropertyName("job_id")]
-        public string? JobId { get; set; }
-
-        [JsonPropertyName("status")]
-        public string? Status { get; set; }
-    }
-}
-
-public sealed class JobStatusResponse
-{
-    [JsonPropertyName("job_id")]
-    public string? JobId { get; set; }
-
-    [JsonPropertyName("status")]
-    public string? Status { get; set; }   // queued|running|done|failed
-
-    [JsonPropertyName("progress")]
-    public int? Progress { get; set; }    // 0..100 (任意)
-
-    [JsonPropertyName("error")]
-    public string? Error { get; set; }    // failed のとき
-}
-
-
-#include "httplib.h"
-#include <fstream>
-#include <string>
-
-int main() {
-  httplib::Server svr;
-
-  svr.Put("/upload", [](const httplib::Request& req, httplib::Response& res) {
-    if (!req.is_multipart_form_data()) {
-      res.status = 415;
-      res.set_content("expected multipart/form-data", "text/plain");
-      return;
-    }
-
-    // JSON: 「ファイルとして送られてくる」ケース（name="json"; filename="xxx.json"）
-    // もしくは「文字列フィールドとして送られてくる」ケース（name="metadata" など）
-    std::string json_text;
-    if (req.has_file("json")) {
-      const auto jf = req.get_file_value("json");
-      json_text = jf.content;
-    } else if (req.has_param("metadata")) {
-      json_text = req.get_param_value("metadata");
-    } else {
-      res.status = 400;
-      res.set_content("missing json/metadata part", "text/plain");
-      return;
-    }
-
-    // バイナリ
-    if (!req.has_file("bin")) {
-      res.status = 400;
-      res.set_content("missing bin part", "text/plain");
-      return;
-    }
-    const auto bf = req.get_file_value("bin");
-
-    // bf.content はバイナリ（\0含む）でも保持できるので、ofstream.write で保存
-    std::ofstream ofs("upload.bin", std::ios::binary);
-    ofs.write(bf.content.data(), static_cast<std::streamsize>(bf.content.size()));
-    ofs.close();
-
-    // json_text はここで JSON parse（nlohmann/json 等）
-    res.set_content("ok", "text/plain");
-  });
-
-  svr.listen("0.0.0.0", 8080);
-}
-
-using System.Net.Http;
-using System.Net.Http.Headers;
-using System.Text;
-
-static async Task SendPutMultipartAsync(
-    Uri endpoint,
-    string jsonFilePath,
-    string binaryFilePath,
-    CancellationToken ct = default)
-{
-    using var http = new HttpClient();
-
-    // PUT + multipart を作るには HttpRequestMessage を使うのが確実
-    using var req = new HttpRequestMessage(HttpMethod.Put, endpoint);
-
-    var multipart = new MultipartFormDataContent(); // boundary は自動で付与される
-
-    // --- JSON part (file) ---
-    // サーバが「json」というフォーム名で受け取る想定
-    var jsonStream = File.OpenRead(jsonFilePath);
-    var jsonContent = new StreamContent(jsonStream);
-    jsonContent.Headers.ContentType = new MediaTypeHeaderValue("application/json");
-    multipart.Add(jsonContent, name: "json", fileName: Path.GetFileName(jsonFilePath));
-
-    // --- Binary part (file) ---
-    // サーバが「bin」というフォーム名で受け取る想定
-    var binStream = File.OpenRead(binaryFilePath);
-    var binContent = new StreamContent(binStream);
-    binContent.Headers.ContentType = new MediaTypeHeaderValue("application/octet-stream");
-    multipart.Add(binContent, name: "bin", fileName: Path.GetFileName(binaryFilePath));
-
-    req.Content = multipart;
-
-    using var resp = await http.SendAsync(req, HttpCompletionOption.ResponseHeadersRead, ct);
-    resp.EnsureSuccessStatusCode();
-}
-
-
-zoom: {
-      pan: {
-        enabled: true,
-        mode: "x",                // "x" / "y" / "xy"
-        modifierKey: "ctrl"       // Ctrl押しながらドラッグでパン（誤操作防止）
-      },
-      zoom: {
-        wheel: { enabled: true }, // ホイールズーム
-        pinch: { enabled: true }, // タッチ
-        drag: { enabled: true },  // ドラッグ範囲でズーム
-        mode: "x"                 // 例：x方向だけズーム
-      }
-    }
-  },
-
-  scales: { ... }
-}
-
-
-(() => {
-  const analysisEl = document.getElementById("analysis");
-  const canvas = document.getElementById("chart");
-  if (!analysisEl || !canvas) return;
-
-  const ctx = canvas.getContext("2d");
-
-  function toPoints(xs, ys) {
-    if (!Array.isArray(xs) || !Array.isArray(ys)) return [];
-    const n = Math.min(xs.length, ys.length);
-    const pts = [];
-    for (let i = 0; i < n; i++) {
-      const x = xs[i], y = ys[i];
-      if (typeof x === "number" && typeof y === "number" && Number.isFinite(x) && Number.isFinite(y)) {
-        pts.push({ x, y });
-      }
-    }
-    return pts;
-  }
-
-  // --- Chart (1 instance) ---
-  const chart = new Chart(ctx, {
-    type: "scatter",
-    data: {
-      datasets: [
-        { label: "Left-1",  yAxisID: "yL1", data: [], pointRadius: 2, showLine: false },
-        { label: "Left-2",  yAxisID: "yL2", data: [], pointRadius: 2, showLine: false },
-        { label: "Right-1", yAxisID: "yR1", data: [], pointRadius: 2, showLine: false },
-        { label: "Right-2", yAxisID: "yR2", data: [], pointRadius: 2, showLine: false }
-      ]
-    },
-    options: {
-      responsive: true,
-      maintainAspectRatio: false,
-      parsing: false,
-      animation: false,
-      plugins: {
-        title: { display: true, text: "Scatter" },
-        legend: { display: true } // 凡例クリックで系列ON/OFF可能
-      },
-      scales: {
-        x: { type: "linear", title: { display: true, text: "ts" } },
-
-        // --- Left (2 axes) ---
-        yL1: {
-          type: "linear",
-          position: "left",
-          title: { display: true, text: "left value 1" },
-          // グリッドは代表としてこれだけ表示（見やすさ優先）
-          grid: { drawOnChartArea: true }
-        },
-        yL2: {
-          type: "linear",
-          position: "left",
-          offset: true,                  // 左側の2本目を外側にずらす
-          title: { display: true, text: "left value 2" },
-          grid: { drawOnChartArea: false } // 追加軸のグリッドは消す
-        },
-
-        // --- Right (2 axes) ---
-        yR1: {
-          type: "linear",
-          position: "right",
-          title: { display: true, text: "right value 1" },
-          grid: { drawOnChartArea: false }
-        },
-        yR2: {
-          type: "linear",
-          position: "right",
-          offset: true,                  // 右側の2本目を外側にずらす
-          title: { display: true, text: "right value 2" },
-          grid: { drawOnChartArea: false }
-        }
-      }
-    }
-  });
-
-  const es = new EventSource("/events");
-  es.onmessage = (ev) => {
-    let obj;
-    try { obj = JSON.parse(ev.data); } catch { return; }
-
-    // 互換: value2 が無い場合に備えて val2/valueB も許容
-    const l = obj.left ?? {};
-    const r = obj.right ?? {};
-
-    const leftTs   = l.ts;
-    const rightTs  = r.ts;
-
-    const leftY1   = l.value;
-    const leftY2   = l.value2 ?? l.valueB ?? l.value_2;
-
-    const rightY1  = r.value;
-    const rightY2  = r.value2 ?? r.valueB ?? r.value_2;
-
-    const leftPts1  = toPoints(leftTs,  leftY1);
-    const leftPts2  = toPoints(leftTs,  leftY2);
-
-    const rightPts1 = toPoints(rightTs, rightY1);
-    const rightPts2 = toPoints(rightTs, rightY2);
-
-    const title = (typeof obj.title === "string" && obj.title.length)
-      ? obj.title
-      : `L1=${leftPts1.length}, L2=${leftPts2.length}, R1=${rightPts1.length}, R2=${rightPts2.length}`;
-
-    chart.options.plugins.title.text = title;
-
-    if (obj.analysis && typeof obj.analysis === "object") {
-      analysisEl.textContent = JSON.stringify(obj.analysis, null, 2);
-    } else {
-      analysisEl.textContent =
-        `Left-1 N=${leftPts1.length}\n` +
-        `Left-2 N=${leftPts2.length}\n` +
-        `Right-1 N=${rightPts1.length}\n` +
-        `Right-2 N=${rightPts2.length}`;
-    }
-
-    // データ差し替え（4系列）
-    chart.data.datasets[0].data = leftPts1;   // yL1
-    chart.data.datasets[1].data = leftPts2;   // yL2
-    chart.data.datasets[2].data = rightPts1;  // yR1
-    chart.data.datasets[3].data = rightPts2;  // yR2
-
-    chart.update("none");
-  };
-
-  es.onerror = () => {
-    analysisEl.textContent = "SSE disconnected (will retry automatically).";
-  };
-})();
-
-
-
-
-(() => {
-  const analysisEl = document.getElementById("analysis");
-  const canvas = document.getElementById("chart");
-  if (!analysisEl || !canvas) return;
-
-  const ctx = canvas.getContext("2d");
-
-  function toPoints(xs, ys) {
-    if (!Array.isArray(xs) || !Array.isArray(ys)) return [];
-    const n = Math.min(xs.length, ys.length);
-    const pts = [];
-    for (let i = 0; i < n; i++) {
-      const x = xs[i], y = ys[i];
-      if (typeof x === "number" && typeof y === "number" && Number.isFinite(x) && Number.isFinite(y)) {
-        pts.push({ x, y });
-      }
-    }
-    return pts;
-  }
-
-  // まず1回だけチャートを作る
-  const chart = new Chart(ctx, {
-    type: "scatter",
-    data: {
-      datasets: [
+        try
         {
-          label: "Left (y)",
-          yAxisID: "y",
-          data: [],
-          pointRadius: 2,
-          showLine: false
-        },
-        {
-          label: "Right (y1)",
-          yAxisID: "y1",
-          data: [],
-          pointRadius: 2,
-          showLine: false
+            using var doc = JsonDocument.Parse(json);
+            if (doc.RootElement.TryGetProperty("jobId", out var el))
+                return el.GetString();
         }
-      ]
-    },
-    options: {
-      responsive: true,
-      maintainAspectRatio: false,
-      parsing: false,
-      animation: false,
-      plugins: {
-        title: { display: true, text: "Scatter" },
-        legend: { display: true }
-      },
-      scales: {
-        x: { type: "linear", title: { display: true, text: "ts" } },
-        y: {
-          type: "linear",
-          position: "left",
-          title: { display: true, text: "left value" }
-        },
-        y1: {
-          type: "linear",
-          position: "right",
-          title: { display: true, text: "right value" },
-          grid: { drawOnChartArea: false } // 右軸のグリッドは消すと見やすい
-        }
-      }
+        catch { }
+        return null;
     }
-  });
+}
 
-  const es = new EventSource("/events");
-  es.onmessage = (ev) => {
-    let obj;
-    try { obj = JSON.parse(ev.data); } catch { return; }
 
-    const leftPts  = toPoints(obj.left?.ts,  obj.left?.value);
-    const rightPts = toPoints(obj.right?.ts, obj.right?.value);
+var http = new HttpClient();
 
-    // タイトル（JSONにあればそれを使う）
-    const title = (typeof obj.title === "string" && obj.title.length)
-      ? obj.title
-      : `Left N=${leftPts.length}, Right N=${rightPts.length}`;
+var client = new JobClient(
+    http,
+    new Uri("http://localhost:8080/events")   // SSE
+);
 
-    chart.options.plugins.title.text = title;
+var result = await client.PutAndWaitCompleteAsync(
+    new Uri("http://localhost:8080/api/doWork"), // PUT先
+    new { param1 = 123, mode = "fast" },         // PUT JSON
+    timeout: TimeSpan.FromSeconds(30),
+    externalCt: CancellationToken.None
+);
 
-    // 解析情報（JSON側で作って渡すならそれを表示、なければ簡易）
-    if (obj.analysis && typeof obj.analysis === "object") {
-      analysisEl.textContent = JSON.stringify(obj.analysis, null, 2);
-    } else {
-      analysisEl.textContent = `Left N=${leftPts.length}\nRight N=${rightPts.length}`;
-    }
+Console.WriteLine($"DONE: {result}");
 
-    // データ差し替え
-    chart.data.datasets[0].data = leftPts;   // y
-    chart.data.datasets[1].data = rightPts;  // y1
 
-    chart.update("none");
-  };
-
-  es.onerror = () => {
-    analysisEl.textContent = "SSE disconnected (will retry automatically).";
-  };
-})();
-
-<!doctype html>
-<html lang="ja">
-<head>
-  <meta charset="utf-8" />
-  <title>Scatter Viewer</title>
-  <style>
-    body { font-family: sans-serif; margin: 16px; }
-
-    .row {
-      display: grid;
-      grid-template-columns: 1fr 1fr;  /* 左右2カラム */
-      gap: 16px;
-      align-items: start;
-    }
-
-    .panel {
-      border: 1px solid #ddd;
-      padding: 12px;
-      background: #fff;
-    }
-
-    .analysis {
-      margin: 0 0 10px 0;
-      padding: 8px 10px;
-      background: #f5f5f5;
-      white-space: pre-wrap;
-      border: 1px solid #ddd;
-      min-height: 90px;
-    }
-
-    canvas { width: 100%; height: 420px; border: 1px solid #ddd; }
-  </style>
-
-  <!-- ローカル配信にしている想定 -->
-  <script src="{{ url_for('static', filename='vendor/chart.umd.min.js') }}"></script>
-  <script src="{{ url_for('static', filename='app.js') }}?v={{ cache_bust }}"></script>
-</head>
-<body>
-  <h2>Two Charts</h2>
-
-  <div class="row">
-    <div class="panel">
-      <div id="analysis1" class="analysis">waiting...</div>
-      <canvas id="chart1"></canvas>
-    </div>
-
-    <div class="panel">
-      <div id="analysis2" class="analysis">waiting...</div>
-      <canvas id="chart2"></canvas>
-    </div>
-  </div>
-</body>
-</html>
-
-(() => {
-  const analysis1 = document.getElementById("analysis1");
-  const analysis2 = document.getElementById("analysis2");
-  const c1 = document.getElementById("chart1");
-  const c2 = document.getElementById("chart2");
-  if (!analysis1 || !analysis2 || !c1 || !c2) return;
-
-  const ctx1 = c1.getContext("2d");
-  const ctx2 = c2.getContext("2d");
-
-  let chart1 = null;
-  let chart2 = null;
-
-  function toPoints(xs, ys) {
-    if (!Array.isArray(xs) || !Array.isArray(ys)) return [];
-    const n = Math.min(xs.length, ys.length);
-    const pts = [];
-    for (let i = 0; i < n; i++) {
-      const x = xs[i], y = ys[i];
-      if (typeof x === "number" && typeof y === "number" && Number.isFinite(x) && Number.isFinite(y)) {
-        pts.push({ x, y });
-      }
-    }
-    return pts;
-  }
-
-  function formatAnalysisFromObject(obj) {
-    // analysis を JSON 文字列で表示（任意）
-    if (obj && typeof obj === "object") return JSON.stringify(obj, null, 2);
-    return "";
-  }
-
-  function renderScatter(ctx, points, titleText, existingChart) {
-    if (existingChart) existingChart.destroy();
-
-    return new Chart(ctx, {
-      type: "scatter",
-      data: {
-        datasets: [{
-          label: "points",
-          data: points,
-          pointRadius: 2,
-          showLine: false
-        }]
-      },
-      options: {
-        animation: false,
-        responsive: true,
-        parsing: false,
-        plugins: {
-          title: { display: true, text: titleText ?? "" }
-        },
-        scales: {
-          x: { type: "linear", title: { display: true, text: "ts" } },
-          y: { type: "linear", title: { display: true, text: "value" } }
-        }
-      }
-    });
-  }
-
-  function updateSide(sideObj, analysisEl, ctx, currentChart, fallbackTitle) {
-    if (!sideObj || typeof sideObj !== "object") {
-      analysisEl.textContent = "No data.";
-      if (currentChart) currentChart.destroy();
-      return null;
-    }
-
-    const points = toPoints(sideObj.ts, sideObj.value);
-
-    const title =
-      (typeof sideObj.title === "string" && sideObj.title.length > 0)
-        ? sideObj.title
-        : `${fallbackTitle} (N=${points.length})`;
-
-    const analysisText =
-      (sideObj.analysis && typeof sideObj.analysis === "object")
-        ? formatAnalysisFromObject(sideObj.analysis)
-        : `N=${points.length}`;
-
-    analysisEl.textContent = analysisText;
-
-    return renderScatter(ctx, points, title, currentChart);
-  }
-
-  const es = new EventSource("/events");
-
-  es.onmessage = (ev) => {
-    let obj;
-    try { obj = JSON.parse(ev.data); } catch { return; }
-
-    // 左右別データ
-    chart1 = updateSide(obj.left, analysis1, ctx1, chart1, "Left");
-    chart2 = updateSide(obj.right, analysis2, ctx2, chart2, "Right");
-  };
-
-  es.onerror = () => {
-    analysis1.textContent = "SSE disconnected (will retry automatically).";
-    analysis2.textContent = "SSE disconnected (will retry automatically).";
-  };
-})();
