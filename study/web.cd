@@ -1,3 +1,54 @@
+public sealed class SseSubscription : IAsyncDisposable
+{
+    private readonly HttpClient _client;
+    private readonly CancellationTokenSource _cts = new();
+    private HttpResponseMessage? _resp;
+    private Stream? _stream;
+    private Task? _loop;
+
+    public SseSubscription(HttpClient client) => _client = client;
+
+    public void Start(string url, Action<string> onLine)
+    {
+        _loop = RunAsync(url, onLine);
+    }
+
+    private async Task RunAsync(string url, Action<string> onLine)
+    {
+        using var req = new HttpRequestMessage(HttpMethod.Get, url);
+        req.Headers.Accept.ParseAdd("text/event-stream");
+
+        _resp = await _client.SendAsync(req, HttpCompletionOption.ResponseHeadersRead, _cts.Token);
+        _resp.EnsureSuccessStatusCode();
+
+        _stream = await _resp.Content.ReadAsStreamAsync(_cts.Token);
+        using var reader = new StreamReader(_stream);
+
+        while (!_cts.IsCancellationRequested)
+        {
+            var line = await reader.ReadLineAsync();
+            if (line is null) break;
+            onLine(line);
+        }
+    }
+
+    public async ValueTask DisposeAsync()
+    {
+        _cts.Cancel();
+        // ★ これで ReadLineAsync を強制的に解除しやすい
+        _stream?.Dispose();
+        _resp?.Dispose();
+
+        if (_loop is not null)
+        {
+            try { await _loop; } catch (OperationCanceledException) { }
+        }
+        _cts.Dispose();
+    }
+}
+
+
+
 using System.Net.Http.Headers;
 
 static HttpClient CreateClient(int maxConn, TimeSpan timeout)
