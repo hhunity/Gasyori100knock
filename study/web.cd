@@ -1,3 +1,36 @@
+using System.Net.Http.Headers;
+
+static HttpClient CreateClient(int maxConn, TimeSpan timeout)
+{
+    var handler = new SocketsHttpHandler
+    {
+        MaxConnectionsPerServer = maxConn,
+        PooledConnectionLifetime = TimeSpan.FromMinutes(10),
+    };
+    return new HttpClient(handler) { Timeout = timeout };
+}
+
+var sseClient = CreateClient(maxConn: 10, timeout: Timeout.InfiniteTimeSpan);
+var apiClient = CreateClient(maxConn: 10, timeout: TimeSpan.FromSeconds(30));
+
+using var sseCts = new CancellationTokenSource();
+
+// SSE 開始（awaitしない）
+var sseTask = SubscribeAsync(
+    sseClient,
+    "http://localhost:8080/events",
+    e => Console.WriteLine($"[{e.Event}] {e.Data}"),
+    sseCts.Token);
+
+// PUT（SSEと別接続で必ず飛ぶ）
+var put = await apiClient.PutAsync("http://localhost:8080/start", content: null);
+Console.WriteLine(await put.Content.ReadAsStringAsync());
+
+var req = new HttpRequestMessage(HttpMethod.Put, "http://localhost:8080/start");
+req.Headers.ConnectionClose = true;
+var resp = await apiClient.SendAsync(req);
+
+
 using System;
 using System.IO;
 using System.Net.Http;
