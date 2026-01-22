@@ -1,3 +1,50 @@
+#include <filesystem>
+#include <system_error>
+#include <string>
+#include <vector>
+#include <cstdint>
+
+namespace fs = std::filesystem;
+
+struct FileItem {
+    std::string name;
+    std::string path;
+    std::uintmax_t size = 0;
+};
+
+// C++20: u8string() は std::u8string（char8_t）なので変換する
+static std::string to_utf8_string(const fs::path& p) {
+#if __cpp_char8_t
+    auto u8 = p.u8string(); // std::u8string
+    std::string s;
+    s.reserve(u8.size());
+    for (char8_t ch : u8) s.push_back(static_cast<char>(ch)); // UTF-8 bytes copy
+    return s;
+#else
+    return p.u8string(); // C++17なら std::string
+#endif
+}
+
+void add_entry(std::vector<FileItem>& items, const fs::directory_entry& entry, const fs::path& base_dir)
+{
+    FileItem it;
+    it.name = to_utf8_string(entry.path().filename());
+    it.path = to_utf8_string(fs::relative(entry.path(), base_dir));
+
+    std::error_code ec;
+    if (entry.is_regular_file(ec) && !ec) {
+        it.size = entry.file_size(ec);
+        if (ec) it.size = 0;
+    } else {
+        it.size = 0;
+    }
+
+    items.push_back(std::move(it));
+}
+
+
+
+
 #include "httplib.h"
 #include <filesystem>
 #include <string>
