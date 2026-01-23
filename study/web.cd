@@ -1,4 +1,60 @@
 
+public sealed class AppUserSettings
+{
+    public string? LastFolder { get; set; }
+    public string? ApiBaseUrl { get; set; }
+    public double MainWindowWidth { get; set; } = 1200;
+    public double MainWindowHeight { get; set; } = 800;
+}
+
+using System.Text.Json;
+
+public sealed class UserSettingsStore
+{
+    private static readonly JsonSerializerOptions JsonOpt = new() { WriteIndented = true };
+
+    public string FilePath { get; }
+
+    public UserSettingsStore(string appName)
+    {
+        var dir = Path.Combine(
+            Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData),
+            appName);
+
+        Directory.CreateDirectory(dir);
+        FilePath = Path.Combine(dir, "settings.json");
+    }
+
+    public AppUserSettings Load()
+    {
+        if (!File.Exists(FilePath)) return new AppUserSettings();
+        var json = File.ReadAllText(FilePath);
+        return JsonSerializer.Deserialize<AppUserSettings>(json) ?? new AppUserSettings();
+    }
+
+    public void Save(AppUserSettings settings)
+    {
+        var json = JsonSerializer.Serialize(settings, JsonOpt);
+        File.WriteAllText(FilePath, json);
+    }
+}
+
+// 起動時
+var store = new UserSettingsStore("MyApp");
+var settings = store.Load();
+
+// 例：最後のフォルダを使う
+var last = settings.LastFolder;
+
+// 終了時
+settings.LastFolder = @"C:\data";
+store.Save(settings);
+
+
+
+
+
+
 using System;
 using Microsoft.Extensions.DependencyInjection;
 
