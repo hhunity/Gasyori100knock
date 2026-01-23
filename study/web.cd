@@ -1,3 +1,72 @@
+
+using System;
+using Microsoft.Extensions.DependencyInjection;
+
+// 1) DIで注入したい「共通のもの」（設定とかサービスとか）
+public sealed class AppSettings
+{
+    public string Prefix { get; init; } = "[INFO] ";
+}
+
+// 2) ViewModel：共通の依存(AppSettings) + 毎回変わる値(message)
+public sealed class MyViewModel
+{
+    public string Text { get; }
+
+    public MyViewModel(string message, AppSettings settings)
+    {
+        Text = settings.Prefix + message;
+    }
+}
+
+// 3) Factory：毎回変わる message を受け取って、ViewModelを作る
+public interface IMyViewModelFactory
+{
+    MyViewModel Create(string message);
+}
+
+public sealed class MyViewModelFactory : IMyViewModelFactory
+{
+    private readonly AppSettings _settings;
+
+    public MyViewModelFactory(AppSettings settings)
+    {
+        _settings = settings;
+    }
+
+    public MyViewModel Create(string message)
+    {
+        return new MyViewModel(message, _settings);
+    }
+}
+
+// 4) 使い方（デモ）
+public static class Program
+{
+    public static void Main()
+    {
+        var services = new ServiceCollection();
+
+        // DI登録（共通）
+        services.AddSingleton(new AppSettings { Prefix = "[APP] " });
+
+        // DI登録（Factory）
+        services.AddSingleton<IMyViewModelFactory, MyViewModelFactory>();
+
+        var sp = services.BuildServiceProvider();
+
+        // 毎回変わる値(message)は Create(message) で渡す
+        var factory = sp.GetRequiredService<IMyViewModelFactory>();
+
+        var vm1 = factory.Create("Hello");
+        var vm2 = factory.Create("Bye");
+
+        Console.WriteLine(vm1.Text); // [APP] Hello
+        Console.WriteLine(vm2.Text); // [APP] Bye
+    }
+}
+
+
 xmlns:i="http://schemas.microsoft.com/xaml/behaviors"
 xmlns:ia="http://schemas.microsoft.com/xaml/behaviors"
 
