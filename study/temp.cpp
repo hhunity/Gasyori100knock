@@ -1,152 +1,149 @@
-#include <filesystem>
-#include <system_error>
-#include <string>
-#include <vector>
-#include <cstdint>
-
-namespace fs = std::filesystem;
-
-struct FileItem {
-    std::string name;
-    std::string path;
-    std::uintmax_t size = 0;
-};
-
-// C++20: u8string() は std::u8string（char8_t）なので変換する
-static std::string to_utf8_string(const fs::path& p) {
-#if __cpp_char8_t
-    auto u8 = p.u8string(); // std::u8string
-    std::string s;
-    s.reserve(u8.size());
-    for (char8_t ch : u8) s.push_back(static_cast<char>(ch)); // UTF-8 bytes copy
-    return s;
-#else
-    return p.u8string(); // C++17なら std::string
-#endif
-}
-
-void add_entry(std::vector<FileItem>& items, const fs::directory_entry& entry, const fs::path& base_dir)
-{
-    FileItem it;
-    it.name = to_utf8_string(entry.path().filename());
-    it.path = to_utf8_string(fs::relative(entry.path(), base_dir));
-
-    std::error_code ec;
-    if (entry.is_regular_file(ec) && !ec) {
-        it.size = entry.file_size(ec);
-        if (ec) it.size = 0;
-    } else {
-        it.size = 0;
-    }
-
-    items.push_back(std::move(it));
-}
-
-
-
-
-#include "httplib.h"
-#include <filesystem>
-#include <string>
+#include <httplib.h>
+#include <mutex>
+#include <condition_variable>
+#include <deque>
+#include <memory>
 #include <vector>
 #include <algorithm>
-#include <cstdio>
+#include <string>
+#include <sstream>
 
-namespace fs = std::filesystem;
+// ===== SSE Session / Hub =====
+struct Session {
+  std::mutex m;
+  std::condition_variable cv;
+  std::deque<std::string> q;
+  bool closed = false;
 
-struct FileItem {
-    std::string name; // UTF-8
-    std::string path; // "upload/xxx"
-    uintmax_t size;
+  void push(std::string msg) {
+    {
+      std::lock_guard lk(m);
+      q.push_back(std::move(msg));
+    }
+    cv.notify_one();
+  }
 };
 
-// JSON文字列を最低限エスケープ（" と \ と制御文字）
-static std::string json_escape(const std::string& s) {
-    std::string out;
-    out.reserve(s.size() + 8);
-    for (unsigned char c : s) {
-        switch (c) {
-        case '\"': out += "\\\""; break;
-        case '\\': out += "\\\\"; break;
-        case '\b': out += "\\b"; break;
-        case '\f': out += "\\f"; break;
-        case '\n': out += "\\n"; break;
-        case '\r': out += "\\r"; break;
-        case '\t': out += "\\t"; break;
-        default:
-            if (c < 0x20) {
-                char buf[7];
-                std::snprintf(buf, sizeof(buf), "\\u%04x", c);
-                out += buf;
-            } else {
-                out += static_cast<char>(c);
-            }
-        }
-    }
-    return out;
+struct Hub {
+  std::mutex m;
+  std::vector<std::weak_ptr<Session>> subs;
+
+  void subscribe(const std::shared_ptr<Session>& s) {
+    std::lock_guard lk(m);
+    subs.emplace_back(s);
+  }
+
+  void broadcast(const std::string& msg) {
+    std::lock_guard lk(m);
+    subs.erase(std::remove_if(subs.begin(), subs.end(),
+      [&](std::weak_ptr<Session>& w){
+        if (auto s = w.lock()) { s->push(msg); return false; }
+        return true;
+      }), subs.end());
+  }
+};
+
+// ===== JSON builder (手書き最小) =====
+// points = vector<pair<x,y>> を [{"x":..,"y":..}, ...] にする
+static std::string make_points_json(const std::vector<std::pair<long long, double>>& points) {
+  std::ostringstream os;
+  os << "{\"points\":[";
+  for (size_t i = 0; i < points.size(); ++i) {
+    if (i) os << ",";
+    os << "{\"x\":" << points[i].first << ",\"y\":" << points[i].second << "}";
+  }
+  os << "]}";
+  return os.str();
+}
+
+static std::string sse_event(const std::string& event, const std::string& data_json) {
+  return "event: " + event + "\n"
+         "data: " + data_json + "\n\n";
+}
+
+// ===== 画像処理が終わったら呼ぶ想定の関数 =====
+static void publish_batch(Hub& hub,
+                          const std::vector<std::pair<long long, double>>& points)
+{
+  // event名は "batch" にして、JS側は addEventListener('batch', ...) で受ける
+  hub.broadcast(sse_event("batch", make_points_json(points)));
 }
 
 int main() {
-    httplib::Server svr;
+  httplib::Server svr;
+  Hub hub;
 
-    const fs::path upload_dir = fs::absolute("upload"); // 固定ディレクトリ
+  // SSE購読
+  svr.Get("/sse", [&](const httplib::Request&, httplib::Response& res) {
+    res.set_header("Content-Type", "text/event-stream");
+    res.set_header("Cache-Control", "no-cache");
+    res.set_header("Connection", "keep-alive");
 
-    svr.Get("/api/uploads", [&](const httplib::Request&, httplib::Response& res) {
-        if (!fs::exists(upload_dir) || !fs::is_directory(upload_dir)) {
-            res.status = 404;
-            res.set_content(R"({"error":"upload dir not found"})", "application/json; charset=utf-8");
-            return;
+    auto session = std::make_shared<Session>();
+    hub.subscribe(session);
+
+    res.set_chunked_content_provider(
+      "text/event-stream",
+      [session](size_t, httplib::DataSink& sink) {
+        std::unique_lock lk(session->m);
+        session->cv.wait(lk, [&]{ return session->closed || !session->q.empty(); });
+        if (session->closed) return false;
+
+        std::string chunk;
+        while (!session->q.empty()) {
+          chunk += std::move(session->q.front());
+          session->q.pop_front();
         }
+        lk.unlock();
 
-        std::vector<FileItem> items;
-        items.reserve(256);
+        return sink.write(chunk.data(), chunk.size());
+      },
+      [session](bool) {
+        std::lock_guard lk(session->m);
+        session->closed = true;
+        session->cv.notify_one();
+      }
+    );
+  });
 
-        for (const auto& entry : fs::directory_iterator(upload_dir)) {
-            if (!entry.is_regular_file()) continue;
+  // デモ用：/emit_batch を叩いたら「複数点」をまとめて配信
+  svr.Post("/emit_batch", [&](const httplib::Request&, httplib::Response& res) {
+    std::vector<std::pair<long long, double>> pts = {
+      {1710000000000LL, 10.0},
+      {1710000000100LL, 12.5},
+      {1710000000200LL, 11.8}
+    };
+    publish_batch(hub, pts);
+    res.set_content("ok", "text/plain");
+  });
 
-            const auto filename_u8 = entry.path().filename().u8string(); // UTF-8
-            const auto rel = fs::path("upload") / entry.path().filename();
-            const auto rel_u8 = rel.generic_u8string(); // "upload/xxx"
+  svr.listen("0.0.0.0", 8080);
+}
 
-            FileItem it;
-            it.name = filename_u8;
-            it.path = rel_u8;
-            it.size = entry.file_size();
-            items.push_back(std::move(it));
-        }
+res.set_chunked_content_provider(
+  "text/event-stream",
+  [session](size_t, httplib::DataSink& sink) {
+    std::unique_lock lk(session->m);
 
-        // 必要ならソート（名前順）
-        std::sort(items.begin(), items.end(),
-                  [](const FileItem& a, const FileItem& b) { return a.name < b.name; });
-
-        std::string body;
-        body.reserve(256 + items.size() * 128);
-
-        body += "{";
-        body += "\"dir\":\"upload\",";
-        body += "\"count\":" + std::to_string(items.size()) + ",";
-        body += "\"files\":[";
-
-        for (size_t i = 0; i < items.size(); ++i) {
-            const auto& f = items[i];
-            if (i > 0) body += ",";
-
-            body += "{";
-            body += "\"name\":\"" + json_escape(f.name) + "\",";
-            body += "\"path\":\"" + json_escape(f.path) + "\",";
-            body += "\"size\":" + std::to_string(f.size);
-            body += "}";
-        }
-
-        body += "]}";
-
-        res.set_header("Cache-Control", "no-store");
-        res.set_content(body, "application/json; charset=utf-8");
+    // ★ 10秒ごとにタイムアウト
+    session->cv.wait_for(lk, std::chrono::seconds(10), [&]{
+      return session->closed || !session->q.empty();
     });
 
-    // upload/ の中身をそのまま静的配信したい場合（任意）
-    // GET /upload/a.tif で取れるようになる
-    svr.set_mount_point("/upload", upload_dir.string().c_str());
+    if (session->closed) return false;
 
-    svr.listen("0.0.0.0", 8080);
-}
+    std::string chunk;
+
+    if (session->q.empty()) {
+      // ★ heartbeat
+      chunk = ": keep-alive\n\n";
+    } else {
+      while (!session->q.empty()) {
+        chunk += std::move(session->q.front());
+        session->q.pop_front();
+      }
+    }
+
+    lk.unlock();
+    return sink.write(chunk.data(), chunk.size());
+  },
