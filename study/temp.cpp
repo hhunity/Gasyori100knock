@@ -1,5 +1,13 @@
 
 
+// mainの初期化直後（スレッド開始前）
+static std::unique_ptr<py::scoped_interpreter> guard;
+guard = std::make_unique<py::scoped_interpreter>();
+
+py::gil_scoped_release release; // ★メインスレッドのGILを解放してから worker開始
+
+
+
 class PythonRuntime {
 public:
     static void Initialize() {
