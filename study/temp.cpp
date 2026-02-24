@@ -1,4 +1,58 @@
 
+#pragma once
+#include <pybind11/embed.h>
+#include <mutex>
+#include <memory>
+#include <string>
+
+namespace py = pybind11;
+
+class PythonRuntime {
+public:
+  // main から 1回だけ呼ぶ（pyDirは "project/py" のように import root）
+  static void Initialize(const std::string& pyDir) {
+    std::call_once(init_flag_, [&] {
+      guard_ = std::make_unique<py::scoped_interpreter>();
+
+      // sys.path 追加や import はこのスレッド（main）で完了させる
+      {
+        py::gil_scoped_acquire gil;
+        auto sys = py::module_::import("sys");
+        sys.attr("path").cast<py::list>().insert(0, py::str(pyDir));
+      }
+
+      // ★重要：ワーカースレッドがGILを取れるように、初期化スレッド側のGILを解放
+      // main で Initialize した場合、ここで “mainがGILを持ちっぱ” を避けられる
+      main_release_ = std::make_unique<py::gil_scoped_release>();
+    });
+  }
+
+  // どのスレッドからでも呼べる（ただし Initialize 済みが前提）
+  template <class... Args>
+  static py::object Call(const char* module_name, const char* func_name, Args&&... args) {
+    py::gil_scoped_acquire gil;
+    py::module_ mod = py::module_::import(module_name);
+    py::object fn = mod.attr(func_name);
+    return fn(std::forward<Args>(args)...);
+  }
+
+  // Python が str を返すケースを想定した便利関数
+  template <class... Args>
+  static std::string CallString(const char* module_name, const char* func_name, Args&&... args) {
+    py::object r = Call(module_name, func_name, std::forward<Args>(args)...);
+    return r.cast<std::string>();
+  }
+
+private:
+  inline static std::once_flag init_flag_;
+  inline static std::unique_ptr<py::scoped_interpreter> guard_;
+  inline static std::unique_ptr<py::gil_scoped_release> main_release_;
+};
+
+
+
+
+
 #include <pybind11/embed.h>
 #include <thread>
 #include <memory>
