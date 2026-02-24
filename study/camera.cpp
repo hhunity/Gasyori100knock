@@ -1,4 +1,98 @@
 
+#include <iostream>
+#include "sapclassbasic.h"
+
+// ---------------------------------------------------------
+// 画像が1フレーム（指定ライン数）取得されるたびに呼ばれるコールバック
+// ---------------------------------------------------------
+void XferCallback(SapXferCallbackInfo *pInfo) {
+    if (pInfo->IsTrash()) {
+        std::cout << "フレームが破棄されました（処理落ち等の可能性）" << std::endl;
+        return;
+    }
+
+    // コールバックが呼ばれた回数（取得フレーム数）をカウント
+    static int frameCount = 0;
+    frameCount++;
+    
+    std::cout << "連続フレーム取得: " << frameCount << " 枚目" << std::endl;
+
+    // ※ ここで pInfo->GetSapBuffer() から画像データを取り出して処理します
+}
+
+int main() {
+    // ---------------------------------------------------------
+    // 1. 設定ファイルのパスと接続先の指定
+    // ---------------------------------------------------------
+    // CamExpertで保存した設定ファイル(.ccf)の絶対パスを指定します
+    const char* configFilePath = "C:\\path\\to\\your\\camera_config.ccf";
+
+    // 接続先（CamExpertの左ツリーで表示されるサーバー名）
+    SapLocation loc("GigEVision_1", 0);
+
+    // ---------------------------------------------------------
+    // 2. Saperaオブジェクトの宣言（コンフィグファイルを渡す）
+    // ---------------------------------------------------------
+    // 第2引数にコンフィグファイルのパスを渡すことで設定をロードします
+    SapAcqDevice acq(&loc, configFilePath);
+    
+    // ※ CameraLinkやCoaXPressなどのフレームグラバー経由の場合は以下を使います
+    // SapAcquisition acq(&loc, configFilePath);
+
+    // 連続取り込み用のリングバッファの構築（ここでは10枚分のバッファを確保）
+    // カメラから次々来る画像を10枚のメモリで使い回します
+    SapBuffer buffers(10, &acq);
+    
+    // 転送オブジェクト（コールバックの登録）
+    SapAcqDeviceToBuf xfer(&acq, &buffers, XferCallback, nullptr);
+    // ※ フレームグラバーの場合は以下
+    // SapAcqToBuf xfer(&acq, &buffers, XferCallback, nullptr);
+
+    // ---------------------------------------------------------
+    // 3. 各オブジェクトの生成（デバイス接続とメモリ確保）
+    // ---------------------------------------------------------
+    std::cout << "デバイスに接続中..." << std::endl;
+    if (!acq.Create()) {
+        std::cerr << "カメラの初期化に失敗しました。CCFファイルのパスを確認してください。" << std::endl;
+        return -1;
+    }
+    if (!buffers.Create()) {
+        std::cerr << "バッファの初期化に失敗しました。" << std::endl;
+        acq.Destroy(); return -1;
+    }
+    if (!xfer.Create()) {
+        std::cerr << "転送オブジェクトの初期化に失敗しました。" << std::endl;
+        buffers.Destroy(); acq.Destroy(); return -1;
+    }
+
+    // ---------------------------------------------------------
+    // 4. 連続画像取得（Grab）の開始
+    // ---------------------------------------------------------
+    std::cout << "連続取得を開始します。Enterキーで終了します..." << std::endl;
+    
+    // Grab()を呼ぶとバックグラウンドで連続撮影が始まり、コールバックが呼ばれ続けます
+    xfer.Grab(); 
+
+    // ユーザー入力（Enterキー）待ち
+    std::cin.get();
+
+    // ---------------------------------------------------------
+    // 5. 終了処理
+    // ---------------------------------------------------------
+    std::cout << "停止処理中..." << std::endl;
+    xfer.Freeze();      // 連続転送の停止要求
+    xfer.Wait(1000);    // 完全に停止するまで待機
+
+    xfer.Destroy();
+    buffers.Destroy();
+    acq.Destroy();
+
+    std::cout << "プログラムを終了します。" << std::endl;
+    return 0;
+}
+
+
+
 
 #include <iostream>
 // Sapera LTの基本ヘッダ
