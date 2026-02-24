@@ -1,4 +1,26 @@
 
+
+class PythonRuntime {
+public:
+    static void Initialize() {
+        std::call_once(init_flag_, []{
+            guard_ = std::make_unique<py::scoped_interpreter>();
+
+            py::gil_scoped_acquire gil;
+            module_ = py::module_::import("app.main");
+        });
+    }
+
+    static py::object GetModule() {
+        return module_;
+    }
+
+private:
+    inline static std::once_flag init_flag_;
+    inline static std::unique_ptr<py::scoped_interpreter> guard_;
+    inline static py::module_ module_;
+};
+
 class PythonRuntime {
 public:
   static void EnsureInitialized();
