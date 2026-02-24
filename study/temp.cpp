@@ -1,3 +1,15 @@
+
+class PythonRuntime {
+public:
+  static void EnsureInitialized();
+
+  static void AddSysPathFront(const std::string& dir) {
+    EnsureInitialized();
+    py::gil_scoped_acquire gil;
+    py::module_ sys = py::module_::import("sys");
+    sys.attr("path").cast<py::list>().insert(0, py::str(dir));
+  }
+};
 // PythonRuntime.h
 #pragma once
 #include <pybind11/embed.h>
