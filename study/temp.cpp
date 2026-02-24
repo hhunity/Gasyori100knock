@@ -1,3 +1,52 @@
+// PythonRuntime.h
+#pragma once
+#include <pybind11/embed.h>
+#include <mutex>
+#include <memory>
+
+namespace py = pybind11;
+
+class PythonRuntime {
+public:
+  // 初期化（何回呼んでもOK。最初の1回だけ有効）
+  static void EnsureInitialized() {
+    std::call_once(init_flag_, [] {
+      guard_ = std::make_unique<py::scoped_interpreter>();
+    });
+  }
+
+  // 便利：Pythonコードを1行/複数行実行（必要なら）
+  static void Exec(const std::string& code) {
+    EnsureInitialized();
+    py::gil_scoped_acquire gil;
+    py::exec(code);
+  }
+
+  // 便利：モジュール import（例: "my_pkg.my_mod"）
+  static py::object Import(const std::string& module_name) {
+    EnsureInitialized();
+    py::gil_scoped_acquire gil;
+    return py::module_::import(module_name.c_str());
+  }
+
+  // 便利：関数呼び出し（module.func(*args)）
+  template <class... Args>
+  static py::object Call(const std::string& module_name,
+                         const std::string& func_name,
+                         Args&&... args) {
+    EnsureInitialized();
+    py::gil_scoped_acquire gil;
+    py::object mod = py::module_::import(module_name.c_str());
+    py::object fn = mod.attr(func_name.c_str());
+    return fn(std::forward<Args>(args)...);
+  }
+
+private:
+  inline static std::once_flag init_flag_;
+  inline static std::unique_ptr<py::scoped_interpreter> guard_;
+};
+
+
 #include <httplib.h>
 #include <mutex>
 #include <condition_variable>
