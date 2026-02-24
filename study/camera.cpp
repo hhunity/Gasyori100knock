@@ -1,3 +1,81 @@
+
+
+#include <iostream>
+// Sapera LTの基本ヘッダ
+#include "sapclassbasic.h"
+
+// ---------------------------------------------------------
+// 画像が1フレーム取得されるたびに呼ばれるコールバック関数
+// ---------------------------------------------------------
+void XferCallback(SapXferCallbackInfo *pInfo) {
+    // エラーチェック
+    if (pInfo->IsTrash()) {
+        std::cout << "フレームが破棄されました（Trash）" << std::endl;
+        return;
+    }
+
+    std::cout << "フレームを取得しました！" << std::endl;
+    // ※ ここで pInfo->GetSapBuffer() を使って画像データ（ポインタ）にアクセスし、
+    // OpenCVのMatに変換するなどの画像処理を行います。
+}
+
+int main() {
+    // 1. 接続先（ロケーション）の指定
+    // 第1引数はSapera Configurationツールで設定されているサーバー名（"GigEVision_1" や "CameraLink_1" など）
+    SapLocation loc("GigEVision_1", 0);
+
+    // 2. Saperaオブジェクトの宣言
+    // GigEカメラの場合は SapAcqDevice を使用。
+    // （※フレームグラバー経由の場合は SapAcquisition に変更してください）
+    SapAcqDevice acq(&loc);
+    
+    // バッファ（画像メモリ）の宣言。ここではカメラの出力フォーマットに合わせて1枚分のバッファを用意
+    SapBuffer buffers(1, &acq);
+    
+    // 転送オブジェクトの宣言（カメラからバッファへ転送し、コールバックを呼ぶ）
+    SapAcqDeviceToBuf xfer(&acq, &buffers, XferCallback, nullptr);
+
+    // 3. 各オブジェクトの生成（メモリ確保やデバイスとの実際の接続）
+    std::cout << "デバイスに接続中..." << std::endl;
+    if (!acq.Create()) {
+        std::cerr << "カメラの初期化に失敗しました。" << std::endl;
+        return -1;
+    }
+    if (!buffers.Create()) {
+        std::cerr << "バッファの初期化に失敗しました。" << std::endl;
+        acq.Destroy();
+        return -1;
+    }
+    if (!xfer.Create()) {
+        std::cerr << "転送オブジェクトの初期化に失敗しました。" << std::endl;
+        buffers.Destroy();
+        acq.Destroy();
+        return -1;
+    }
+
+    // 4. 画像取得（Grab）の開始
+    std::cout << "画像取得を開始します。Enterキーで終了します..." << std::endl;
+    xfer.Grab();
+
+    // ユーザー入力（Enterキー）待ち
+    std::cin.get();
+
+    // 5. 終了処理（安全に停止してメモリを解放）
+    std::cout << "停止処理中..." << std::endl;
+    xfer.Freeze();      // 転送の停止要求
+    xfer.Wait(1000);    // 完全に停止するまで最大1秒待機
+
+    // 作成した逆順で破棄
+    xfer.Destroy();
+    buffers.Destroy();
+    acq.Destroy();
+
+    std::cout << "プログラムを終了します。" << std::endl;
+    return 0;
+}
+
+
+
 factry
 
 std::unique_ptr<ICameraDriver> CreateDriver(const CameraSpec& spec) {
