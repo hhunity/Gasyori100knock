@@ -1,4 +1,23 @@
 
+
+void XferCallback(SapXferCallbackInfo *pInfo) {
+    if (pInfo->IsTrash()) return;
+
+    // 1. イベントからバッファのポインタを取得
+    SapBuffer* pBuffer = pInfo->GetSapBuffer();
+    
+    // 2. バッファからハードウェアのタイムスタンプ（64bit整数）を抽出
+    UINT64 hwTimeStamp = 0;
+    
+    // CORBUFFER_PRM_TIMESTAMP はバッファに付与されたカメラ側の時間を取るための定数
+    if (pBuffer->GetParameter(CORBUFFER_PRM_TIMESTAMP, &hwTimeStamp)) {
+        std::cout << "カメラ露光タイムスタンプ: " << hwTimeStamp << std::endl;
+    } else {
+        std::cout << "タイムスタンプが取得できません（CamExpertの設定を確認）" << std::endl;
+    }
+}
+
+
 #include <iostream>
 #include "sapclassbasic.h"
 
