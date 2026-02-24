@@ -1,4 +1,33 @@
 
+#include <iostream>
+#include "sapclassbasic.h"
+
+// ... コールバック関数などは省略 ...
+
+int main() {
+    // 1. システムに認識されているサーバー（デバイス）の数を取得
+    int serverCount = SapManager::GetServerCount();
+    
+    if (serverCount <= 1) {
+        // サーバー0はシステム自身なので、1以下の場合はカメラが見つかっていない
+        std::cerr << "カメラ（サーバー）が見つかりません。" << std::endl;
+        return -1;
+    }
+
+    // 2. 1番目の実際のデバイス（インデックス1）の名前を取得してみる
+    char serverName[CORSERVER_MAX_STRLEN];
+    SapManager::GetServerName(1, serverName, sizeof(serverName));
+    std::cout << "見つかったデバイス: " << serverName << std::endl;
+
+    // 3. 取得した名前を使って SapLocation を作成
+    SapLocation loc(serverName, 0);
+
+    // 以降は前回のコードと同じ
+    SapAcqDevice acq(&loc, "C:\\path\\to\\your\\camera_config.ccf");
+    // ...
+}
+
+
 
 void XferCallback(SapXferCallbackInfo *pInfo) {
     if (pInfo->IsTrash()) return;
