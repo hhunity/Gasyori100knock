@@ -1,4 +1,45 @@
 
+#include <pybind11/embed.h>
+#include <thread>
+#include <memory>
+#include <iostream>
+namespace py = pybind11;
+
+static std::unique_ptr<py::scoped_interpreter> g_py;
+
+void InitPythonSingleThread() {
+  g_py = std::make_unique<py::scoped_interpreter>();
+
+  // sys.path 追加など（GIL必要）
+  {
+    py::gil_scoped_acquire gil;
+    auto sys = py::module_::import("sys");
+    sys.attr("path").cast<py::list>().insert(0, "C:/project/py");
+  }
+
+  // ★重要：worker を動かす前にメインのGILを解放
+  static py::gil_scoped_release main_release;
+}
+
+std::string CallFromAnyThread() {
+  py::gil_scoped_acquire gil;
+  auto mod = py::module_::import("app.main");
+  return mod.attr("get_message")().cast<std::string>();
+}
+
+int main() {
+  InitPythonSingleThread();
+
+  std::thread t1([]{
+    std::cout << CallFromAnyThread() << "\n";
+  });
+  std::thread t2([]{
+    std::cout << CallFromAnyThread() << "\n";
+  });
+
+  t1.join();
+  t2.join();
+}
 
 // mainの初期化直後（スレッド開始前）
 static std::unique_ptr<py::scoped_interpreter> guard;
