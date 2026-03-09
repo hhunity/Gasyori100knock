@@ -1,3 +1,20 @@
+# Step1: バウンディングボックスでアノテーション（ドラッグして囲む）
+python annotate_bbox.py --images dataset/images --output dataset/annotations
+
+# Step2: 学習（CPU向け・batch=1〜2推奨）
+python faster_rcnn_count.py train \
+  --images      dataset/images \
+  --annotations dataset/annotations \
+  --epochs      60 \
+  --batch-size  1 \
+  --lr          5e-3 \
+  --cpu
+
+# Step3: 推論
+python faster_rcnn_count.py predict \
+  入力画像.jpg \
+  --weights checkpoints/best_model.pth \
+  --score-thresh 0.5
 
 
 # faster_rcnn_count.py
