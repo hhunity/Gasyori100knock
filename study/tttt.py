@@ -1,3 +1,25 @@
+# 最小外接矩形ではなく、細長さを面積ベースで判定
+for cnt in contours:
+    area = cv2.contourArea(cnt)
+    if area < min_area:
+        continue
+    
+    # 骨格化して長さを測る方が曲がった棒に向いてる
+    mask = np.zeros_like(binary)
+    cv2.drawContours(mask, [cnt], -1, 255, -1)
+    
+    # 細線化（骨格抽出）
+    from skimage.morphology import skeletonize
+    skeleton = skeletonize(mask // 255)
+    length = np.sum(skeleton)  # 骨格のピクセル数≒長さ
+    
+    width = area / length  # 面積÷長さ≒太さ
+    
+    if width < 20:  # 細いものだけ
+        rods.append(cnt)
+
+
+
 
 import cv2
 import numpy as np
