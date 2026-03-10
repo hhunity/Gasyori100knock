@@ -1,4 +1,76 @@
 
+
+import cv2
+import numpy as np
+
+def count_blobs(image_path):
+    img = cv2.imread(image_path, cv2.IMREAD_GRAYSCALE)
+    
+    # 二値化
+    _, binary = cv2.threshold(img, 127, 255, cv2.THRESH_BINARY)
+    
+    # 輪郭検出
+    contours, _ = cv2.findContours(binary, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    
+    blobs = []
+    for cnt in contours:
+        area = cv2.contourArea(cnt)
+        if area < 50:  # 小さすぎるノイズを除外
+            continue
+        
+        # 楕円フィット（5点以上必要）
+        if len(cnt) >= 5:
+            ellipse = cv2.fitEllipse(cnt)
+            (cx, cy), (minor, major), angle = ellipse
+            
+            aspect_ratio = minor / major  # 1に近いほど丸、0に近いほど細長い
+            
+            # 条件を緩めに（丸〜細長い楕円まで許容）
+            if aspect_ratio > 0.2:  # 極端に細長いものは除外
+                blobs.append({
+                    "center": (cx, cy),
+                    "angle": angle,
+                    "aspect_ratio": aspect_ratio
+                })
+    
+    print(f"検出数: {len(blobs)}")
+    return blobs
+
+blobs = count_blobs("input.tif")
+
+
+
+import cv2
+import numpy as np
+
+def count_circles(image_path):
+    img = cv2.imread(image_path, cv2.IMREAD_GRAYSCALE)
+    
+    # 二値化
+    _, binary = cv2.threshold(img, 127, 255, cv2.THRESH_BINARY)
+    
+    # 輪郭検出
+    contours, _ = cv2.findContours(binary, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    
+    # 丸っぽいものだけフィルタ
+    circles = []
+    for cnt in contours:
+        area = cv2.contourArea(cnt)
+        perimeter = cv2.arcLength(cnt, True)
+        if perimeter == 0:
+            continue
+        circularity = 4 * np.pi * area / (perimeter ** 2)  # 1に近いほど丸
+        if circularity > 0.7 and area > 50:  # 閾値は調整
+            circles.append(cnt)
+    
+    print(f"検出数: {len(circles)}")
+    return len(circles)
+
+count_circles("input.tif")
+
+
+
+
 # sam2_count.py
 # SAM2（Segment Anything Model 2）で物体をセグメントしてカウントする
 #
