@@ -1,4 +1,44 @@
 
+import cv2
+import numpy as np
+
+def count_rods(image_path, min_area=50, max_aspect_ratio=0.3):
+    img = cv2.imread(image_path, cv2.IMREAD_GRAYSCALE)
+    
+    _, binary = cv2.threshold(img, 127, 255, cv2.THRESH_BINARY)
+    
+    contours, _ = cv2.findContours(binary, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    
+    rods = []
+    for cnt in contours:
+        area = cv2.contourArea(cnt)
+        if area < min_area:
+            continue
+        
+        # 傾いた最小外接矩形
+        rect = cv2.minAreaRect(cnt)
+        (cx, cy), (w, h), angle = rect
+        
+        if w == 0 or h == 0:
+            continue
+        
+        aspect_ratio = min(w, h) / max(w, h)  # 細長いほど0に近い
+        
+        if aspect_ratio < max_aspect_ratio:  # 細長いものだけ
+            rods.append({
+                "center": (cx, cy),
+                "angle": angle,
+                "width": min(w, h),
+                "length": max(w, h),
+                "aspect_ratio": aspect_ratio
+            })
+    
+    print(f"検出数: {len(rods)}")
+    return rods
+
+rods = count_rods("input.tif")
+
+
 
 import cv2
 import numpy as np
