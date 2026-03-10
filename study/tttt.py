@@ -1,3 +1,42 @@
+import cv2
+import numpy as np
+
+def count_crystals(image_path, min_area=50, max_area=5000, max_aspect_ratio=0.5):
+    img = cv2.imread(image_path, cv2.IMREAD_GRAYSCALE)
+    
+    # 二値化（ノイズ除去込み）
+    blurred = cv2.GaussianBlur(img, (3, 3), 0)
+    _, binary = cv2.threshold(blurred, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+    
+    contours, _ = cv2.findContours(binary, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    
+    crystals = []
+    for cnt in contours:
+        area = cv2.contourArea(cnt)
+        
+        # サイズフィルタ
+        if area < min_area or area > max_area:
+            continue
+        
+        # 細長さフィルタ
+        rect = cv2.minAreaRect(cnt)
+        (cx, cy), (w, h), angle = rect
+        if w == 0 or h == 0:
+            continue
+        aspect_ratio = min(w, h) / max(w, h)
+        if aspect_ratio < max_aspect_ratio:  # 長方形っぽいものだけ
+            crystals.append({
+                "center": (cx, cy),
+                "angle": angle,
+                "area": area,
+                "aspect_ratio": aspect_ratio
+            })
+    
+    print(f"検出数: {len(crystals)}")
+    return crystals
+
+
+
 # 最小外接矩形ではなく、細長さを面積ベースで判定
 for cnt in contours:
     area = cv2.contourArea(cnt)
