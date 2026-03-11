@@ -1,3 +1,383 @@
+# opencv_count.py
+# OpenCVを使ったルールベース物体検出・カウント
+# 学習不要・即使える
+#
+# 【インストール】
+#   pip install opencv-python numpy matplotlib
+#
+# 【使い方】
+#   python opencv_count.py 画像.jpg
+#   python opencv_count.py 画像.jpg --method adaptive  # 照明ムラに強い
+#   python opencv_count.py 画像.jpg --method canny     # エッジ検出
+#   python opencv_count.py 画像.jpg --invert           # 暗い背景に明るい物体
+#   python opencv_count.py 画像.jpg --min-area 100 --max-area 5000
+#   python opencv_count.py 画像.jpg --interactive      # パラメータをGUIで調整
+
+import cv2
+import numpy as np
+import argparse
+import os
+import matplotlib.pyplot as plt
+import matplotlib.patches as patches
+
+
+# ==================== 検出処理 ====================
+
+def preprocess(img_gray, blur_size=3):
+    """ノイズ除去"""
+    if blur_size > 1:
+        k = blur_size if blur_size % 2 == 1 else blur_size + 1
+        img_gray = cv2.GaussianBlur(img_gray, (k, k), 0)
+    return img_gray
+
+
+def threshold_global(img_gray, thresh_val=127, invert=False):
+    """グローバル閾値で2値化"""
+    flag = cv2.THRESH_BINARY_INV if invert else cv2.THRESH_BINARY
+    _, binary = cv2.threshold(img_gray, thresh_val, 255, flag)
+    return binary
+
+
+def threshold_otsu(img_gray, invert=False):
+    """大津法で自動閾値を決定"""
+    flag = cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU if invert else cv2.THRESH_BINARY + cv2.THRESH_OTSU
+    _, binary = cv2.threshold(img_gray, 0, 255, flag)
+    return binary
+
+
+def threshold_adaptive(img_gray, block_size=21, c=5, invert=False):
+    """適応的閾値（照明ムラに強い）"""
+    flag = cv2.ADAPTIVE_THRESH_MEAN_C
+    method = cv2.THRESH_BINARY_INV if invert else cv2.THRESH_BINARY
+    binary = cv2.adaptiveThreshold(img_gray, 255, flag, method, block_size, c)
+    return binary
+
+
+def detect_canny(img_gray, low=50, high=150):
+    """Cannyエッジ検出 → 輪郭を閉じて2値化"""
+    edges  = cv2.Canny(img_gray, low, high)
+    kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3))
+    closed = cv2.morphologyEx(edges, cv2.MORPH_CLOSE, kernel, iterations=2)
+    filled = closed.copy()
+    contours, _ = cv2.findContours(closed, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    cv2.drawContours(filled, contours, -1, 255, cv2.FILLED)
+    return filled
+
+
+def morphology_cleanup(binary, open_iter=1, close_iter=1, kernel_size=3):
+    """モルフォロジー処理でノイズ除去・穴埋め"""
+    k = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (kernel_size, kernel_size))
+    if open_iter > 0:
+        binary = cv2.morphologyEx(binary, cv2.MORPH_OPEN,  k, iterations=open_iter)
+    if close_iter > 0:
+        binary = cv2.morphologyEx(binary, cv2.MORPH_CLOSE, k, iterations=close_iter)
+    return binary
+
+
+def filter_contours(contours, min_area, max_area, min_ratio, max_ratio):
+    """
+    輪郭を面積・縦横比でフィルタリング
+
+    Args:
+        contours  : cv2.findContoursの結果
+        min_area  : 最小面積（px²）
+        max_area  : 最大面積（px²）
+        min_ratio : 縦横比の最小値（細長さ下限）
+        max_ratio : 縦横比の最大値（細長さ上限）
+
+    Returns:
+        valid     : 条件を満たす輪郭のリスト
+        info      : 各輪郭の情報（面積・縦横比・bbox）
+    """
+    valid = []
+    info  = []
+    for cnt in contours:
+        area = cv2.contourArea(cnt)
+        if area < min_area or area > max_area:
+            continue
+        x, y, w, h = cv2.boundingRect(cnt)
+        if w == 0 or h == 0:
+            continue
+        ratio = max(w, h) / min(w, h)
+        if ratio < min_ratio or ratio > max_ratio:
+            continue
+        valid.append(cnt)
+        info.append({
+            'area' : area,
+            'ratio': ratio,
+            'bbox' : (x, y, w, h),
+            'rect' : cv2.minAreaRect(cnt),  # 回転ありバウンディングボックス
+        })
+    return valid, info
+
+
+def detect(img_gray, method='otsu', invert=False, blur_size=3,
+           thresh_val=127, block_size=21, adaptive_c=5,
+           canny_low=50, canny_high=150,
+           open_iter=1, close_iter=1, kernel_size=3,
+           min_area=100, max_area=50000,
+           min_ratio=1.0, max_ratio=50.0):
+    """
+    メイン検出処理
+
+    Returns:
+        contours_valid: フィルタ済み輪郭リスト
+        info          : 各輪郭の情報
+        binary        : 2値化画像
+        processed     : 前処理後グレースケール
+    """
+    processed = preprocess(img_gray, blur_size)
+
+    if method == 'global':
+        binary = threshold_global(processed, thresh_val, invert)
+    elif method == 'otsu':
+        binary = threshold_otsu(processed, invert)
+    elif method == 'adaptive':
+        binary = threshold_adaptive(processed, block_size, adaptive_c, invert)
+    elif method == 'canny':
+        binary = detect_canny(processed, canny_low, canny_high)
+    else:
+        binary = threshold_otsu(processed, invert)
+
+    binary = morphology_cleanup(binary, open_iter, close_iter, kernel_size)
+
+    contours, _ = cv2.findContours(binary, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    contours_valid, info = filter_contours(contours, min_area, max_area, min_ratio, max_ratio)
+
+    return contours_valid, info, binary, processed
+
+
+# ==================== 可視化 ====================
+
+def visualize(img_bgr, contours, info, binary, args, save_path):
+    """検出結果を4分割で可視化して保存"""
+    img_rgb = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2RGB)
+    count   = len(contours)
+
+    fig, axes = plt.subplots(1, 3, figsize=(18, 6))
+    fig.patch.set_facecolor('#1a1a2e')
+    for ax in axes:
+        ax.set_facecolor('#1a1a2e')
+        ax.axis('off')
+
+    # 元画像
+    axes[0].imshow(img_rgb, cmap='gray' if len(img_rgb.shape) == 2 else None)
+    axes[0].set_title('元画像', color='white', fontsize=13, pad=10)
+
+    # 2値化結果
+    axes[1].imshow(binary, cmap='gray')
+    axes[1].set_title(f'2値化（{args.method}）', color='white', fontsize=13, pad=10)
+
+    # 検出結果（輪郭 + バウンディングボックス）
+    result_img = img_rgb.copy()
+    # 輪郭を描画
+    cv2.drawContours(result_img, contours, -1, (0, 255, 100), 2)
+    # バウンディングボックスと番号
+    for i, (cnt, inf) in enumerate(zip(contours, info)):
+        x, y, w, h = inf['bbox']
+        cv2.rectangle(result_img, (x, y), (x+w, y+h), (255, 80, 80), 1)
+        cx = x + w // 2
+        cy = y + h // 2
+        cv2.circle(result_img, (cx, cy), 3, (255, 255, 0), -1)
+
+    axes[2].imshow(result_img)
+    axes[2].set_title(f'検出結果: {count} 個', color='white', fontsize=13, pad=10)
+
+    plt.suptitle(
+        f'OpenCV ルールベース検出  |  {count} 個検出  |  {args.method}',
+        color='white', fontsize=15, fontweight='bold', y=1.02
+    )
+    plt.tight_layout()
+    plt.savefig(save_path, dpi=150, bbox_inches='tight',
+                facecolor='#1a1a2e', edgecolor='none')
+    print(f"[INFO] 結果を保存: {save_path}")
+    plt.show()
+
+
+def print_stats(info, img_shape):
+    """検出結果の統計を表示"""
+    if not info:
+        print("  検出なし")
+        return
+    areas  = [i['area']  for i in info]
+    ratios = [i['ratio'] for i in info]
+    print(f"  面積    最小={min(areas):.0f}  最大={max(areas):.0f}  平均={np.mean(areas):.0f}")
+    print(f"  縦横比  最小={min(ratios):.1f}  最大={max(ratios):.1f}  平均={np.mean(ratios):.1f}")
+
+
+# ==================== インタラクティブモード ====================
+
+def interactive_mode(img_bgr):
+    """トラックバーでパラメータをリアルタイム調整"""
+    img_gray = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2GRAY)
+    h, w     = img_gray.shape
+    win      = 'OpenCV 検出パラメータ調整  (Q=終了・S=保存)'
+    cv2.namedWindow(win, cv2.WINDOW_NORMAL)
+    cv2.resizeWindow(win, min(w*2, 1400), min(h, 700))
+
+    cv2.createTrackbar('閾値',        win, 127,  255, lambda x: None)
+    cv2.createTrackbar('反転(0/1)',   win, 0,    1,   lambda x: None)
+    cv2.createTrackbar('ブラー',      win, 3,    21,  lambda x: None)
+    cv2.createTrackbar('最小面積',    win, 100,  5000,lambda x: None)
+    cv2.createTrackbar('最大面積',    win, 5000, 50000,lambda x: None)
+    cv2.createTrackbar('最小縦横比x10',win,10,  200, lambda x: None)
+    cv2.createTrackbar('Open反復',   win, 1,    5,   lambda x: None)
+    cv2.createTrackbar('Close反復',  win, 1,    5,   lambda x: None)
+
+    print("インタラクティブモード起動")
+    print("  Q キー: 終了")
+    print("  S キー: 現在の設定で結果を保存")
+
+    while True:
+        thresh_val = cv2.getTrackbarPos('閾値',         win)
+        invert     = cv2.getTrackbarPos('反転(0/1)',    win) == 1
+        blur       = cv2.getTrackbarPos('ブラー',       win)
+        min_area   = cv2.getTrackbarPos('最小面積',     win)
+        max_area   = cv2.getTrackbarPos('最大面積',     win)
+        min_ratio  = cv2.getTrackbarPos('最小縦横比x10',win) / 10.0
+        open_iter  = cv2.getTrackbarPos('Open反復',    win)
+        close_iter = cv2.getTrackbarPos('Close反復',   win)
+
+        blur = blur if blur % 2 == 1 else blur + 1
+        blur = max(1, blur)
+
+        contours, info, binary, _ = detect(
+            img_gray, method='global',
+            invert=invert, blur_size=blur, thresh_val=thresh_val,
+            open_iter=open_iter, close_iter=close_iter,
+            min_area=max(1, min_area), max_area=max(1, max_area),
+            min_ratio=min_ratio, max_ratio=50.0
+        )
+
+        # 検出結果を描画
+        result = cv2.cvtColor(img_gray, cv2.COLOR_GRAY2BGR)
+        cv2.drawContours(result, contours, -1, (0, 255, 100), 2)
+        for inf in info:
+            x, y, bw, bh = inf['bbox']
+            cv2.rectangle(result, (x, y), (x+bw, y+bh), (80, 80, 255), 1)
+
+        # 2値化と結果を横並び表示
+        binary_bgr = cv2.cvtColor(binary, cv2.COLOR_GRAY2BGR)
+        display    = np.hstack([binary_bgr, result])
+
+        cv2.putText(display, f'Count: {len(contours)}',
+                    (10, 35), cv2.FONT_HERSHEY_SIMPLEX, 1.2, (0, 255, 255), 2)
+
+        cv2.imshow(win, display)
+        key = cv2.waitKey(30) & 0xFF
+        if key == ord('q') or key == 27:
+            break
+        elif key == ord('s'):
+            cv2.imwrite('interactive_result.png', result)
+            print(f"[INFO] 保存: interactive_result.png  検出数: {len(contours)}")
+
+    cv2.destroyAllWindows()
+    return len(contours), thresh_val, invert, blur, min_area, max_area, min_ratio
+
+
+# ==================== メイン ====================
+
+def main():
+    parser = argparse.ArgumentParser(
+        description='OpenCVルールベース物体検出・カウント（学習不要）',
+        formatter_class=argparse.RawTextHelpFormatter
+    )
+    parser.add_argument('image', help='入力画像パス')
+    parser.add_argument('--method', default='otsu',
+                        choices=['global', 'otsu', 'adaptive', 'canny'],
+                        help=('2値化手法\n'
+                              '  global   : 固定閾値（--thresh で指定）\n'
+                              '  otsu     : 大津法（自動閾値・デフォルト）\n'
+                              '  adaptive : 適応的閾値（照明ムラに強い）\n'
+                              '  canny    : エッジ検出'))
+    parser.add_argument('--invert',      action='store_true',
+                        help='白黒反転（暗い背景に明るい物体の場合）')
+    parser.add_argument('--thresh',      type=int,   default=127,
+                        help='グローバル閾値（--method global のみ有効 default:127）')
+    parser.add_argument('--blur',        type=int,   default=3,
+                        help='ガウシアンブラーのカーネルサイズ（奇数 default:3）')
+    parser.add_argument('--block-size',  type=int,   default=21,
+                        help='適応的閾値のブロックサイズ（奇数 default:21）')
+    parser.add_argument('--adaptive-c',  type=int,   default=5,
+                        help='適応的閾値の定数C（default:5）')
+    parser.add_argument('--canny-low',   type=int,   default=50,
+                        help='Cannyエッジ検出の下限閾値（default:50）')
+    parser.add_argument('--canny-high',  type=int,   default=150,
+                        help='Cannyエッジ検出の上限閾値（default:150）')
+    parser.add_argument('--open',        type=int,   default=1,
+                        help='モルフォロジーOpenの反復回数（ノイズ除去 default:1）')
+    parser.add_argument('--close',       type=int,   default=1,
+                        help='モルフォロジーCloseの反復回数（穴埋め default:1）')
+    parser.add_argument('--kernel',      type=int,   default=3,
+                        help='モルフォロジーカーネルサイズ（default:3）')
+    parser.add_argument('--min-area',    type=int,   default=100,
+                        help='最小面積フィルタ（px² default:100）')
+    parser.add_argument('--max-area',    type=int,   default=50000,
+                        help='最大面積フィルタ（px² default:50000）')
+    parser.add_argument('--min-ratio',   type=float, default=1.0,
+                        help='縦横比の最小値（細長さ下限 default:1.0）')
+    parser.add_argument('--max-ratio',   type=float, default=50.0,
+                        help='縦横比の最大値（細長さ上限 default:50.0）')
+    parser.add_argument('--output',      default=None,
+                        help='結果画像の保存先（省略時は自動命名）')
+    parser.add_argument('--interactive', action='store_true',
+                        help='GUIでパラメータをリアルタイム調整')
+    args = parser.parse_args()
+
+    if not os.path.isfile(args.image):
+        print(f"[ERROR] 画像が見つかりません: {args.image}")
+        return
+
+    img_bgr  = cv2.imread(args.image)
+    img_gray = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2GRAY)
+    h, w     = img_gray.shape
+    print(f"[INFO] 画像サイズ: {w}×{h}")
+
+    # インタラクティブモード
+    if args.interactive:
+        interactive_mode(img_bgr)
+        return
+
+    # 通常モード
+    contours, info, binary, processed = detect(
+        img_gray,
+        method      = args.method,
+        invert      = args.invert,
+        blur_size   = args.blur,
+        thresh_val  = args.thresh,
+        block_size  = args.block_size,
+        adaptive_c  = args.adaptive_c,
+        canny_low   = args.canny_low,
+        canny_high  = args.canny_high,
+        open_iter   = args.open,
+        close_iter  = args.close,
+        kernel_size = args.kernel,
+        min_area    = args.min_area,
+        max_area    = args.max_area,
+        min_ratio   = args.min_ratio,
+        max_ratio   = args.max_ratio,
+    )
+
+    count = len(contours)
+    print(f"\n{'='*40}")
+    print(f"  検出数: {count}")
+    print(f"{'='*40}")
+    print_stats(info, img_gray.shape)
+
+    # 保存先
+    if args.output is None:
+        stem        = os.path.splitext(os.path.basename(args.image))[0]
+        save_path   = f'result_opencv_{stem}.png'
+    else:
+        save_path   = args.output
+
+    visualize(img_bgr, contours, info, binary, args, save_path)
+
+
+if __name__ == '__main__':
+    main()
+
+
 import cv2
 import numpy as np
 
