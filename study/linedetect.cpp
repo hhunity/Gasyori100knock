@@ -1,266 +1,679 @@
-// MarkerDetectSingle.hpp
-// MarkerDetectWithOtsuSampling.hpp
-#include <opencv2/opencv.hpp>
-#include <cstdint>
-#include <chrono>
+#include <cuda_runtime.h>
+#include <cufft.h>
+#include <thread>
+#include <queue>
+#include <mutex>
+#include <condition_variable>
+#include <cstring>
 #include <cstdio>
+#include <vector>
 
-// ---- パラメータ --------------------------------------------------
-struct RunParams {
-    // 連続長条件（相対行）
-    int minFirstWhite  = 100;
-    int minBlack       = 950;
-    int maxBlack       = 1050;
-    int minSecondWhite = 100;
+// ============================================================
+// 切り替えスイッチ
+//   USE_CUFFTDX : cuFFTDx版（gatherTiles+FFTを1カーネルに統合）
+//   USE_WARP_REDUCTION : findPeakをwarpリダクション版に
+// ============================================================
+// #define USE_CUFFTDX       // cuFFTDxインストール済みの場合に有効化
+#define USE_WARP_REDUCTION   // SM使用率を上げる場合に有効化
 
-    // ヒステリシスしきい（0なら Otsu 自動）
-    int thrWhiteHigh   = 185;   // 以上で白（0=自動）
-    int thrBlackLow    = 120;   // 以下で黒（0=自動）
-    int otsuMargin     = 30;    // thrWhiteHigh = otsu + margin
+#ifdef USE_CUFFTDX
+#include <cufftdx.hpp>
 
-    // ★ Otsu 用ヒストグラム作成のサンプリング間隔
-    //   1=全画素, 2=1つおき, 3=2つおき...
-    int histStepX      = 1;     // 列方向ステップ
-    int histStepY      = 1;     // 行方向ステップ
+// Blackwell sm_120 向け 128点C2C FFT定義
+using FFT_1D = decltype(
+    cufftdx::Size<128>()
+    + cufftdx::Type<cufftdx::fft_type::c2c>()
+    + cufftdx::Direction<cufftdx::fft_direction::forward>()
+    + cufftdx::Precision<float>()
+    + cufftdx::SM<120>()
+    + cufftdx::Block()
+);
 
-    // 穴あき許容（FSM 側）
-    int blackHoleBudget  = 2;   // 黒区間中に許容する白行
-    int whiteSpikeBudget = 2;   // 白区間中に許容する黒行
+using IFFT_1D = decltype(
+    cufftdx::Size<128>()
+    + cufftdx::Type<cufftdx::fft_type::c2c>()
+    + cufftdx::Direction<cufftdx::fft_direction::inverse>()
+    + cufftdx::Precision<float>()
+    + cufftdx::SM<120>()
+    + cufftdx::Block()
+);
+#endif
 
-    // ROI（列方向）
-    int roiX = 0;
-    int roiW = -1;              // -1 で全幅
+// ============================================================
+// 定数
+// ============================================================
+static constexpr int IMG_W       = 2048;
+static constexpr int IMG_H       = 2048;
+static constexpr int TILE_W      = 128;   // タイル横サイズ
+static constexpr int TILE_H      = 128;   // タイル縦サイズ
+static constexpr int STRIDE_X    = 64;    // 横ストライド（TILE_W/2で50%オーバーラップ）
+static constexpr int STRIDE_Y    = 64;    // 縦ストライド
+static constexpr int NUM_TILES_X = (IMG_W - TILE_W) / STRIDE_X + 1;  // 水平タイル数
+static constexpr int NUM_TILES_Y = (IMG_H - TILE_H) / STRIDE_Y + 1;  // 垂直タイル数
+static constexpr int NUM_TILES   = NUM_TILES_X * NUM_TILES_Y;
+static constexpr int NUM_PAIRS   = (NUM_TILES_X / 2) * NUM_TILES_Y;  // 左右ペア数
+static constexpr int RING_SIZE   = 4;
 
-    // デバッグ
-    int debug = 0;              // 0=OFF, 1=ON（stderr にログ）
+// ============================================================
+// 結果構造体
+// ============================================================
+struct Peak {
+    float x;
+    float y;
+    float val;
 };
 
-// ---- 結果 --------------------------------------------------------
-struct RunResultRel {
-    bool      found      = false;
-    int       blackFirst = -1;
-    int       blackStart = -1;
-    int       blackEnd   = -1;
-    long long elapsed_us = 0;
-    int       usedThrWhiteHigh = -1;
-    int       usedThrBlackLow  = -1;
+struct Result {
+    int  slot;
+    Peak peaks[NUM_PAIRS];
 };
 
-// ---- Otsu 閾値（サンプリング対応・コピーなし） -------------------
-inline int computeOtsuThresholdSampled(const cv::Mat& view, int stepX, int stepY, uint64_t* outSampleCount = nullptr)
+// ============================================================
+// スレッドセーフキュー
+// ============================================================
+template<typename T>
+class TSQueue {
+    std::queue<T>           q;
+    std::mutex              m;
+    std::condition_variable cv;
+public:
+    void push(const T& v) {
+        std::lock_guard<std::mutex> lk(m);
+        q.push(v);
+        cv.notify_one();
+    }
+    T pop() {
+        std::unique_lock<std::mutex> lk(m);
+        cv.wait(lk, [&]{ return !q.empty(); });
+        T v = q.front(); q.pop();
+        return v;
+    }
+};
+
+// ============================================================
+// リングバッファスロット
+// ============================================================
+struct RingSlot {
+    uint16_t*   cpu_ptr        = nullptr;  // Pinned CPUバッファ
+    uint16_t*   d_raw          = nullptr;  // GPU入力（uint16）
+    float*      d_hann_w       = nullptr;  // ハン窓テーブル横 [TILE_W]
+    float*      d_hann_h       = nullptr;  // ハン窓テーブル縦 [TILE_H]
+    float2*     d_tiles        = nullptr;  // タイルバッファ [NUM_TILES][TILE_W][TILE_W]
+    float2*     d_corr         = nullptr;  // 位相相関結果  [NUM_PAIRS][TILE_W][TILE_W]
+    Peak*       d_peaks        = nullptr;  // ピーク座標    [NUM_PAIRS]
+    cudaEvent_t doneEvent      = nullptr;
+    bool        externalPinned = false;
+};
+
+// ============================================================
+// CPUでタイル並び替え（USE_CUFFTDXなしの場合のみ使用）
+// ============================================================
+#ifndef USE_CUFFTDX
+
+
+// ============================================================
+// cuFFT版：Sobel + タイル収集 + ハン窓 + float2変換 を1カーネルで
+// ============================================================
+__global__ void sobelAndGather(
+    float2*         dst,        // [NUM_TILES][TILE_H][TILE_W]
+    const uint16_t* src,        // 元画像 [IMG_H][IMG_W]
+    const float*    hannW,      // [TILE_W] 横方向ハン窓
+    const float*    hannH,      // [TILE_H] 縦方向ハン窓
+    int imgW, int imgH, int tileW, int tileH, int numTilesX)
 {
-    CV_Assert(view.type() == CV_8UC1);
-    if (stepX <= 0) stepX = 1;
-    if (stepY <= 0) stepY = 1;
+    int tileIdx = blockIdx.z;
+    int tx = tileIdx % numTilesX;
+    int ty = tileIdx / numTilesX;
+    int x  = blockIdx.x * blockDim.x + threadIdx.x;
+    int y  = blockIdx.y * blockDim.y + threadIdx.y;
 
-    uint64_t hist[256] = {0};
-    uint64_t total = 0;
+    if (x >= tileW || y >= tileH) return;
 
-    for (int y = 0; y < view.rows; y += stepY) {
-        const uint8_t* p = view.ptr<uint8_t>(y);
-        for (int x = 0; x < view.cols; x += stepX) {
-            ++hist[p[x]];
-            ++total;
-        }
-    }
-    if (outSampleCount) *outSampleCount = total;
+    // 元画像上の絶対座標（ストライドで位置を決める）
+    int gx = tx * STRIDE_X + x;
+    int gy = ty * STRIDE_Y + y;
 
-    if (total == 0) return 127; // フォールバック
+    // 境界クランプ
+    int x0 = max(gx-1, 0), x1 = min(gx+1, imgW-1);
+    int y0 = max(gy-1, 0), y1 = min(gy+1, imgH-1);
 
-    // 全画素の重み付き平均（サンプルに対する）
-    double sum = 0.0;
-    for (int i = 0; i < 256; ++i) sum += (double)i * (double)hist[i];
+    // 3x3近傍を読む
+    float p00 = src[y0*imgW+x0], p10 = src[y0*imgW+gx], p20 = src[y0*imgW+x1];
+    float p01 = src[gy*imgW+x0],                         p21 = src[gy*imgW+x1];
+    float p02 = src[y1*imgW+x0], p12 = src[y1*imgW+gx], p22 = src[y1*imgW+x1];
 
-    double sumB = 0.0;
-    uint64_t wB = 0;
-    double varMax = -1.0;
-    int threshold = 0;
+    // Sobel勾配
+    float sx = -p00 + p20 - 2.f*p01 + 2.f*p21 - p02 + p22;
+    float sy = -p00 - 2.f*p10 - p20 + p02 + 2.f*p12 + p22;
+    float mag = sqrtf(sx*sx + sy*sy);
 
-    for (int t = 0; t < 256; ++t) {
-        wB += hist[t];
-        if (wB == 0) continue;
-        uint64_t wF = total - wB;
-        if (wF == 0) break;
-
-        sumB += (double)t * (double)hist[t];
-        double mB = sumB / wB;
-        double mF = (sum - sumB) / wF;
-
-        double varBetween = (double)wB * (double)wF * (mB - mF) * (mB - mF);
-        if (varBetween > varMax) { varMax = varBetween; threshold = t; }
-    }
-    return threshold;
+    // 横・縦独立のハン窓 + float2変換（タイル順に書き出し）
+    float w = hannW[x] * hannH[y];
+    int dstIdx = tileIdx * tileW * tileH + y * tileW + x;
+    dst[dstIdx] = { mag * w, 0.f };
 }
 
-// ---- 本体：1メソッドで完結（ヒステリシス＋穴あき許容＋Otsu自動） ---
-inline RunResultRel processAndDetectWithHoles(const uint8_t* data, int W, int H, ptrdiff_t stride,
-                                              RunParams p)
+#else // USE_CUFFTDX
+
+// ============================================================
+// cuFFTDx版：タイル収集 + ハン窓 + FFT を1カーネルで実行
+// ============================================================
+__global__ void gatherHannAndFFT(
+    float2*          dst,        // [NUM_TILES][TILE_H][TILE_W]
+    const uint16_t*  src,        // 元画像 [IMG_H][IMG_W]（並び替え不要）
+    const float*     hannW,      // [TILE_W] 横方向ハン窓
+    const float*     hannH,      // [TILE_H] 縦方向ハン窓
+    int imgW, int tileW, int tileH, int numTilesX)
 {
-    RunResultRel out{};
-    const auto t0 = std::chrono::high_resolution_clock::now();
+    int tileIdx = blockIdx.x;
+    int tx = tileIdx % numTilesX;
+    int ty = tileIdx / numTilesX;
 
-    if (!data || W <= 0 || H <= 0) return out;
-    if (stride <= 0) stride = W;
+    __shared__ float2 smem[FFT_1D::shared_memory_size];
 
-    // ROI
-    cv::Mat m(H, W, CV_8UC1, const_cast<uint8_t*>(data), (size_t)stride);
-    int x0 = (p.roiX < 0) ? 0 : (p.roiX > W ? W : p.roiX);
-    int ww = (p.roiW > 0) ? p.roiW : W;
-    if (ww > W - x0) ww = W - x0;
-    if (ww <= 0) return out;
+    float2* tileOut = dst + tileIdx * tileW * tileH;
 
-    cv::Mat view = m(cv::Rect(x0, 0, ww, H));
-
-    // ---- Otsu しきい自動（必要時のみ・サンプリング対応） ----
-    if (p.thrWhiteHigh == 0 || p.thrBlackLow == 0) {
-        uint64_t sampled = 0;
-        int otsuT = computeOtsuThresholdSampled(view, p.histStepX, p.histStepY, &sampled);
-        if (p.thrBlackLow  == 0) p.thrBlackLow  = otsuT;
-        if (p.thrWhiteHigh == 0) p.thrWhiteHigh = otsuT + p.otsuMargin;
-        if (p.debug) {
-            std::fprintf(stderr,
-                "[DEBUG] Otsu(sampling X=%d,Y=%d) samples=%llu  T=%d  -> thrB=%d thrW=%d\n",
-                p.histStepX, p.histStepY, (unsigned long long)sampled,
-                otsuT, p.thrBlackLow, p.thrWhiteHigh);
+    // ① 行方向FFT（TILE_W点）
+    for (int row = threadIdx.y; row < tileH; row += blockDim.y) {
+        float2 data[FFT_1D::elements_per_thread];
+        for (int k = 0; k < FFT_1D::elements_per_thread; k++) {
+            int x      = threadIdx.x + k * blockDim.x;
+            int srcIdx = (ty * STRIDE_Y + row) * imgW + tx * STRIDE_X + x;
+            float w    = hannW[x] * hannH[row];
+            data[k]    = { (float)src[srcIdx] * w, 0.f };
+        }
+        FFT_1D().execute(data, smem);
+        for (int k = 0; k < FFT_1D::elements_per_thread; k++) {
+            int x = threadIdx.x + k * blockDim.x;
+            tileOut[row * tileW + x] = data[k];
         }
     }
-    
-    out.usedThrBlackLow  = p.thrBlackLow;
-    out.usedThrWhiteHigh = p.thrWhiteHigh;
+    __syncthreads();
 
-    // 行平均（0..255, float）
-    cv::Mat rowMeanF; // H×1, CV_32F
-    cv::reduce(view, rowMeanF, 1, cv::REDUCE_AVG, CV_32F);
-
-    // FSM（穴あき許容）
-    enum Phase { P_FirstWhite, P_Black, P_SecondWhite };
-    Phase phase = P_FirstWhite;
-    int lastBW = 0;   // +1=白, -1=黒, 0=未定
-    int run = 0;      // 現フェーズの連続長
-    int hole = 0;     // 黒フェーズでの白穴 使用数
-    int spike = 0;    // 白フェーズでの黒スパイク 使用数
-    int blackStart = -1, blackEnd = -1, blackFirst = -1;
-
-    if (p.debug) {
-        std::fprintf(stderr,
-            "[DEBUG] start: W=%d H=%d ROI=(x=%d,w=%d) thrW>=%d thrB<=%d "
-            "hole=%d spike=%d  req:W%d-B[%d..%d]-W%d\n",
-            W, H, x0, ww, p.thrWhiteHigh, p.thrBlackLow,
-            p.blackHoleBudget, p.whiteSpikeBudget,
-            p.minFirstWhite, p.minBlack, p.maxBlack, p.minSecondWhite
-        );
-    }
-
-    for (int y = 0; y < H; ++y) {
-        float v = rowMeanF.at<float>(y);
-
-        int bw = lastBW;
-        if (v >= p.thrWhiteHigh) bw = +1;
-        else if (v <= p.thrBlackLow) bw = -1;
-
-        bool isBlack = (bw == -1);
-        bool isWhite = !isBlack;
-        if (p.debug) {
-            char bwc = (bw==+1?'W':(bw==-1?'B':'?'));
-            std::fprintf(stderr, "[DEBUG] y=%d v=%.1f bw=%c phase=%d run=%d hole=%d spike=%d\n",
-                         y, v, bwc, (int)phase, run, hole, spike);
+    // ② 列方向FFT（TILE_H点）
+    for (int col = threadIdx.x; col < tileW; col += blockDim.x) {
+        float2 data[IFFT_1D::elements_per_thread];
+        for (int k = 0; k < IFFT_1D::elements_per_thread; k++) {
+            int y  = threadIdx.y + k * blockDim.y;
+            data[k] = tileOut[y * tileW + col];
         }
-        lastBW = bw;
-
-        switch (phase) {
-        case P_FirstWhite:
-            if (isWhite) { ++run; spike = 0; }
-            else {
-                if (p.whiteSpikeBudget > 0 && spike < p.whiteSpikeBudget) { ++spike; }
-                else { run = 0; spike = 0; }
-            }
-            if (run >= p.minFirstWhite) { phase = P_Black; run = 0; hole = 0; blackStart = -1; blackFirst = -1; }
-            break;
-
-        case P_Black:
-            if (isBlack) {
-                if (run == 0) { blackStart = y; blackFirst = y; }
-                ++run; hole = 0;
-                if (run > p.maxBlack) { blackStart = y; blackFirst = y; run = 1; hole = 0; }
-            } else {
-                if (p.blackHoleBudget > 0 && hole < p.blackHoleBudget) { ++hole; }
-                else {
-                    blackEnd = y - hole - 1;
-                    if (run >= p.minBlack && run <= p.maxBlack) {
-                        phase = P_SecondWhite; run = 1; spike = 0;
-                    } else {
-                        phase = P_FirstWhite; run = isWhite ? 1 : 0; spike = isWhite?0:1; blackStart = blackFirst = -1;
-                    }
-                }
-            }
-            break;
-
-        case P_SecondWhite:
-            if (isWhite) { ++run; spike = 0; }
-            else {
-                if (p.whiteSpikeBudget > 0 && spike < p.whiteSpikeBudget) { ++spike; }
-                else { phase = P_FirstWhite; run = 0; spike = 0; blackStart = blackFirst = -1; }
-            }
-            if (run >= p.minSecondWhite) {
-                out.found      = true;
-                out.blackFirst = blackFirst;
-                out.blackStart = blackStart;
-                out.blackEnd   = blackEnd;
-                const auto t1 = std::chrono::high_resolution_clock::now();
-                out.elapsed_us = std::chrono::duration_cast<std::chrono::microseconds>(t1 - t0).count();
-                return out;
-            }
-            break;
+        IFFT_1D().execute(data, smem);
+        for (int k = 0; k < IFFT_1D::elements_per_thread; k++) {
+            int y = threadIdx.y + k * blockDim.y;
+            tileOut[y * tileW + col] = data[k];
         }
     }
-
-    const auto t1 = std::chrono::high_resolution_clock::now();
-    out.elapsed_us = std::chrono::duration_cast<std::chrono::microseconds>(t1 - t0).count();
-    return out;
 }
 
-int main() {
-    int W = 32, H = 512*4;
-    cv::Mat img(H, W, CV_8UC1, cv::Scalar(255)); // 全白
+// ============================================================
+// cuFFTDx版：逆FFT（位相相関結果に適用）
+// ============================================================
+__global__ void inverseFFT2D(
+    float2* data,   // [NUM_PAIRS][TILE_W][TILE_W] in-place
+    int tileW)
+{
+    int pairIdx = blockIdx.x;
+    float2* tile = data + pairIdx * tileW * tileW;
 
-    for (int y = 300; y < 1300; ++y) {
-        img.row(y).setTo(0);
+    __shared__ float2 smem[IFFT_1D::shared_memory_size];
+
+    // ① 行方向IFFT
+    for (int row = threadIdx.y; row < tileW; row += blockDim.y) {
+        float2 d[IFFT_1D::elements_per_thread];
+        for (int k = 0; k < IFFT_1D::elements_per_thread; k++) {
+            int x = threadIdx.x + k * blockDim.x;
+            d[k]  = tile[row * tileW + x];
+        }
+        IFFT_1D().execute(d, smem);
+        for (int k = 0; k < IFFT_1D::elements_per_thread; k++) {
+            int x = threadIdx.x + k * blockDim.x;
+            tile[row * tileW + x] = d[k];
+        }
     }
-    
-    img.row(300).setTo(0);    //
-    img.row(800).setTo(255);  //
-    img.row(1600).setTo(0);   //
+    __syncthreads();
 
-    RunParams prm; // デフォルト {100,950,1050,100,185,120,0,-1}
-    prm.minFirstWhite  = 300;
-    prm.minBlack       = 980;
-    prm.maxBlack       = 1020;
-    prm.minSecondWhite = 300;
-    prm.thrWhiteHigh   = 180;  // 白判定しきい
-    prm.thrBlackLow    = 50;  // 黒判定しきい
-    prm.histStepX      = 4;         // 例: 横は4ピクセルおきにサンプル
-    prm.histStepY      = 2;         // 例: 縦は2行おきにサンプル
-    prm.roiX = 0;
-    prm.roiW = -1;
-    prm.blackHoleBudget   = 10;  // 黒区間中に許容する「白」行数（0で無効）
-    prm.whiteSpikeBudget  = 10;  // 白区間中に許容する「黒」行数（0で無効）
-    prm.debug = 0;
-
-    RunResultRel r;
-    long long time_sum = 0;
-    int count_max = 100;
-    
-    for(int c = 0;c < count_max;c++) {
-        r = processAndDetectWithHoles(img.data, img.cols, img.rows, img.step, prm);
-        time_sum += r.elapsed_us;
-    }
-
-    if (r.found) {
-        std::cout << "hit: first=" << r.blackFirst
-                << " start=" << r.blackStart
-                << " end="   << r.blackEnd
-                << " (" << time_sum/count_max << " us)\n";
-    } else {
-        std::cout << "not found (" << time_sum/count_max  << " us)\n";
+    // ② 列方向IFFT
+    for (int col = threadIdx.x; col < tileW; col += blockDim.x) {
+        float2 d[IFFT_1D::elements_per_thread];
+        for (int k = 0; k < IFFT_1D::elements_per_thread; k++) {
+            int y = threadIdx.y + k * blockDim.y;
+            d[k]  = tile[y * tileW + col];
+        }
+        IFFT_1D().execute(d, smem);
+        for (int k = 0; k < IFFT_1D::elements_per_thread; k++) {
+            int y = threadIdx.y + k * blockDim.y;
+            tile[y * tileW + col] = d[k];
+        }
     }
 }
+#endif // USE_CUFFTDX
+
+// ============================================================
+// 位相相関カーネル（共通）
+// ============================================================
+__global__ void phaseCorrelation(
+    float2*       out,
+    const float2* tiles,
+    int tileSize, int numTilesX, int numTilesX2)  // numTilesX2 = numTilesX/2
+{
+    int pairIdx  = blockIdx.y;
+    int col      = pairIdx % numTilesX2;
+    int row      = pairIdx / numTilesX2;
+    int leftIdx  = row * numTilesX + col;
+    int rightIdx = row * numTilesX + col + numTilesX2;
+
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx >= tileSize) return;
+
+    float2 a = tiles[leftIdx  * tileSize + idx];
+    float2 b = tiles[rightIdx * tileSize + idx];
+
+    float2 prod = { a.x*b.x + a.y*b.y,
+                    a.y*b.x - a.x*b.y };
+
+    float mag = sqrtf(prod.x*prod.x + prod.y*prod.y) + 1e-8f;
+    out[pairIdx * tileSize + idx] = { prod.x/mag, prod.y/mag };
+}
+
+// ============================================================
+// ピーク探索カーネル（共通）
+// ============================================================
+#ifndef USE_WARP_REDUCTION
+// シンプル版
+__global__ void findPeak(
+    Peak* peaks, const float2* corr, int tileW, int tileH, int tileSize)
+{
+    int pairIdx = blockIdx.x;
+    const float2* tile = corr + pairIdx * tileSize;
+    if (threadIdx.x != 0) return;
+
+    float maxVal = -1.f;
+    int   maxIdx = 0;
+    for (int i = 0; i < tileSize; i++) {
+        float v = tile[i].x * tile[i].x + tile[i].y * tile[i].y;
+        if (v > maxVal) { maxVal = v; maxIdx = i; }
+    }
+
+    int peakX = maxIdx % tileW;
+    int peakY = maxIdx / tileW;
+
+    float m00 = 0.f, m10 = 0.f, m01 = 0.f;
+    for (int dy = -2; dy <= 2; dy++)
+    for (int dx = -2; dx <= 2; dx++) {
+        int nx = (peakX + dx + tileW) % tileW;
+        int ny = (peakY + dy + tileH) % tileH;
+        float2 c = tile[ny * tileW + nx];
+        float  v = c.x * c.x + c.y * c.y;
+        m00 += v; m10 += v * dx; m01 += v * dy;
+    }
+
+    float subX = peakX + m10 / m00;
+    float subY = peakY + m01 / m00;
+
+    if (subX >= tileW / 2) subX -= tileW;
+    if (subY >= tileH / 2) subY -= tileH;
+
+    peaks[pairIdx].x   = subX;
+    peaks[pairIdx].y   = subY;
+    peaks[pairIdx].val = m00;
+}
+
+#else
+// warpリダクション版
+__global__ void findPeak(
+    Peak* peaks, const float2* corr, int tileW, int tileH, int tileSize)
+{
+    int pairIdx = blockIdx.x;
+    int tid     = threadIdx.x;
+    const float2* tile = corr + pairIdx * tileSize;
+
+    float maxVal = -1.f;
+    int   maxIdx = 0;
+    for (int i = tid; i < tileSize; i += blockDim.x) {
+        float v = tile[i].x * tile[i].x + tile[i].y * tile[i].y;
+        if (v > maxVal) { maxVal = v; maxIdx = i; }
+    }
+
+    for (int offset = warpSize / 2; offset > 0; offset >>= 1) {
+        float otherVal = __shfl_down_sync(0xffffffff, maxVal, offset);
+        int   otherIdx = __shfl_down_sync(0xffffffff, maxIdx, offset);
+        if (otherVal > maxVal) { maxVal = otherVal; maxIdx = otherIdx; }
+    }
+
+    int warpId   = tid / warpSize;
+    int laneId   = tid % warpSize;
+    int numWarps = blockDim.x / warpSize;
+
+    __shared__ float sVal[32];
+    __shared__ int   sIdx[32];
+
+    if (laneId == 0) { sVal[warpId] = maxVal; sIdx[warpId] = maxIdx; }
+    __syncthreads();
+
+    if (warpId == 0) {
+        maxVal = laneId < numWarps ? sVal[laneId] : -1.f;
+        maxIdx = laneId < numWarps ? sIdx[laneId] : 0;
+        for (int offset = warpSize / 2; offset > 0; offset >>= 1) {
+            float otherVal = __shfl_down_sync(0xffffffff, maxVal, offset);
+            int   otherIdx = __shfl_down_sync(0xffffffff, maxIdx, offset);
+            if (otherVal > maxVal) { maxVal = otherVal; maxIdx = otherIdx; }
+        }
+        if (laneId == 0) {
+            // 生の[0, N-1]空間でピーク位置を取得
+            int peakX = maxIdx % tileW;
+            int peakY = maxIdx / tileW;
+
+            float m00 = 0.f, m10 = 0.f, m01 = 0.f;
+            for (int dy = -2; dy <= 2; dy++)
+            for (int dx = -2; dx <= 2; dx++) {
+                int nx = (peakX + dx + tileW) % tileW;
+                int ny = (peakY + dy + tileH) % tileH;
+                float2 c = tile[ny * tileW + nx];
+                float  v = c.x * c.x + c.y * c.y;
+                m00 += v; m10 += v * dx; m01 += v * dy;
+            }
+
+            float subX = peakX + m10 / m00;
+            float subY = peakY + m01 / m00;
+
+            if (subX >= tileW / 2) subX -= tileW;
+            if (subY >= tileH / 2) subY -= tileH;
+
+            peaks[pairIdx].x   = subX;
+            peaks[pairIdx].y   = subY;
+            peaks[pairIdx].val = m00;
+        }
+    }
+}
+#endif // USE_WARP_REDUCTION
+
+// ============================================================
+// パイプライン本体
+// ============================================================
+class CudaPipeline {
+public:
+
+    bool init() {
+        for (int i = 0; i < RING_SIZE; i++) {
+            cudaStreamCreate(&streams_[i]);
+            if (!initSlot(i))   return false;
+            if (!buildGraph(i)) return false;
+            freeSlots_.push(i);
+        }
+        return true;
+    }
+
+    // 外部バッファをPinned登録（カメラSDK等が確保済みの場合）
+    bool registerExternalRingBuffer(void* ptrs[], int count, size_t sizeEach) {
+        if (count != RING_SIZE) {
+            fprintf(stderr, "registerExternalRingBuffer: count must be %d\n", RING_SIZE);
+            return false;
+        }
+        for (int i = 0; i < RING_SIZE; i++) {
+            auto& s = slots_[i];
+            if (s.cpu_ptr && !s.externalPinned) {
+                cudaFreeHost(s.cpu_ptr);
+                s.cpu_ptr = nullptr;
+            }
+            cudaError_t err = cudaHostRegister(ptrs[i], sizeEach, cudaHostRegisterDefault);
+            if (err != cudaSuccess) {
+                fprintf(stderr, "cudaHostRegister slot[%d] failed: %s\n",
+                        i, cudaGetErrorString(err));
+                return false;
+            }
+            s.cpu_ptr        = static_cast<uint16_t*>(ptrs[i]);
+            s.externalPinned = true;
+        }
+        return true;
+    }
+
+    // GPUクロックを最大に固定（管理者権限が必要）
+    void lockGpuClock() {
+        nvmlInit();
+        nvmlDevice_t nvmlDev;
+        nvmlDeviceGetHandleByIndex(0, &nvmlDev);
+        unsigned int minClock, maxClock;
+        nvmlDeviceGetMinMaxClockOfPState(nvmlDev, NVML_CLOCK_GRAPHICS,
+            NVML_PSTATE_0, &minClock, &maxClock);
+        nvmlDeviceSetGpuLockedClocks(nvmlDev, maxClock, maxClock);
+        nvmlShutdown();
+    }
+
+    void unlockGpuClock() {
+        nvmlInit();
+        nvmlDevice_t nvmlDev;
+        nvmlDeviceGetHandleByIndex(0, &nvmlDev);
+        nvmlDeviceResetGpuLockedClocks(nvmlDev);
+        nvmlShutdown();
+    }
+
+    // 各スレッドから直接呼ぶ（スレッドセーフ）
+    Result process(const void* cameraData) {
+        int slot = freeSlots_.pop();
+        auto& s  = slots_[slot];
+
+#ifndef USE_CUFFTDX
+        // cuFFT版：元画像をそのままコピー
+        memcpy(s.cpu_ptr, cameraData, IMG_W * IMG_H * sizeof(uint16_t));
+#else
+        // cuFFTDx版：並び替え不要、そのままコピー
+        memcpy(s.cpu_ptr, cameraData, IMG_W * IMG_H * sizeof(uint16_t));
+#endif
+
+        cudaGraphLaunch(graphExecs_[slot], streams_[slot]);
+        cudaEventRecord(s.doneEvent, streams_[slot]);
+        cudaEventSynchronize(s.doneEvent);
+
+        Result result;
+        result.slot = slot;
+        cudaMemcpy(result.peaks, s.d_peaks,
+                   NUM_PAIRS * sizeof(Peak), cudaMemcpyDeviceToHost);  // 左右ペア分
+
+        freeSlots_.push(slot);
+        return result;
+    }
+
+    void cleanup() {
+        for (int i = 0; i < RING_SIZE; i++) {
+            if (graphExecs_[i]) cudaGraphExecDestroy(graphExecs_[i]);
+            if (graphs_[i])     cudaGraphDestroy(graphs_[i]);
+            if (streams_[i])    cudaStreamDestroy(streams_[i]);
+
+            auto& s = slots_[i];
+            if (s.cpu_ptr) {
+                if (s.externalPinned) cudaHostUnregister(s.cpu_ptr);
+                else                  cudaFreeHost(s.cpu_ptr);
+            }
+            if (s.d_raw)        cudaFree(s.d_raw);
+            if (s.d_hann_w) cudaFree(s.d_hann_w);
+            if (s.d_hann_h) cudaFree(s.d_hann_h);
+            if (s.d_tiles) cudaFree(s.d_tiles);
+            if (s.d_corr)  cudaFree(s.d_corr);
+            if (s.d_peaks) cudaFree(s.d_peaks);
+            if (s.doneEvent) cudaEventDestroy(s.doneEvent);
+        }
+#ifndef USE_CUFFTDX
+        for (int i = 0; i < RING_SIZE; i++) {
+            if (plans_[i])  cufftDestroy(plans_[i]);
+            if (iplans_[i]) cufftDestroy(iplans_[i]);
+        }
+#endif
+    }
+
+private:
+    RingSlot        slots_[RING_SIZE];
+    cudaStream_t    streams_[RING_SIZE]    = {};
+    cudaGraph_t     graphs_[RING_SIZE]     = {};
+    cudaGraphExec_t graphExecs_[RING_SIZE] = {};
+    TSQueue<int>    freeSlots_;
+
+#ifndef USE_CUFFTDX
+    cufftHandle     plans_[RING_SIZE]      = {};  // Forward FFT
+    cufftHandle     iplans_[RING_SIZE]     = {};  // Inverse FFT
+#endif
+
+    bool initSlot(int i) {
+        auto& s = slots_[i];
+
+        // CPUバッファ（Pinned）
+        size_t cpuSize = IMG_W * IMG_H * sizeof(uint16_t);
+        cudaMallocHost(&s.cpu_ptr, cpuSize);
+
+#ifndef USE_CUFFTDX
+        // cuFFT版：元画像バッファ
+        cudaMalloc(&s.d_raw, IMG_W * IMG_H * sizeof(uint16_t));
+#else
+        // cuFFTDx版：元画像そのままのバッファ
+        cudaMalloc(&s.d_raw, IMG_W * IMG_H * sizeof(uint16_t));
+#endif
+
+        // ハン窓テーブル（横・縦、初期化時に1回だけ計算）
+        cudaMalloc(&s.d_hann_w, TILE_W * sizeof(float));
+        cudaMalloc(&s.d_hann_h, TILE_H * sizeof(float));
+        std::vector<float> hannW(TILE_W), hannH(TILE_H);
+        for (int j = 0; j < TILE_W; j++)
+            hannW[j] = 0.5f - 0.5f * cosf(2.f * M_PI * j / (TILE_W - 1));
+        for (int j = 0; j < TILE_H; j++)
+            hannH[j] = 0.5f - 0.5f * cosf(2.f * M_PI * j / (TILE_H - 1));
+        cudaMemcpy(s.d_hann_w, hannW.data(), TILE_W * sizeof(float), cudaMemcpyHostToDevice);
+        cudaMemcpy(s.d_hann_h, hannH.data(), TILE_H * sizeof(float), cudaMemcpyHostToDevice);
+
+        cudaMalloc(&s.d_tiles, NUM_TILES * TILE_W * TILE_H * sizeof(float2));
+        cudaMalloc(&s.d_corr,  NUM_PAIRS * TILE_W * TILE_H * sizeof(float2));
+        cudaMalloc(&s.d_peaks, NUM_PAIRS * sizeof(Peak));
+        cudaEventCreate(&s.doneEvent);
+        return true;
+    }
+
+    bool buildGraph(int i) {
+        auto& s = slots_[i];
+
+#ifndef USE_CUFFTDX
+        // cuFFT版：planを作成
+        int n[2] = { TILE_H, TILE_W };  // 行優先（H, W）
+        if (cufftPlanMany(&plans_[i], 2, n,
+                          nullptr, 1, TILE_W * TILE_H,
+                          nullptr, 1, TILE_W * TILE_H,
+                          CUFFT_C2C, NUM_TILES) != CUFFT_SUCCESS) {
+            fprintf(stderr, "cufftPlanMany fwd slot[%d] failed\n", i);
+            return false;
+        }
+        cufftSetStream(plans_[i], streams_[i]);
+
+        if (cufftPlanMany(&iplans_[i], 2, n,
+                          nullptr, 1, TILE_W * TILE_H,
+                          nullptr, 1, TILE_W * TILE_H,
+                          CUFFT_C2C, NUM_PAIRS) != CUFFT_SUCCESS) {
+            fprintf(stderr, "cufftPlanMany inv slot[%d] failed\n", i);
+            return false;
+        }
+        cufftSetStream(iplans_[i], streams_[i]);
+#endif
+
+        cudaStreamBeginCapture(streams_[i], cudaStreamCaptureModeGlobal);
+
+#ifndef USE_CUFFTDX
+        // ============================================================
+        // cuFFT版フロー
+        // ① H2D転送（タイル並び替え済み、16MB）
+
+        // ③ Forward FFT（cuFFT 256バッチ）
+        // ④ 位相相関
+        // ⑤ Inverse FFT（cuFFT 128バッチ）
+        // ⑥ findPeak
+        // ============================================================
+
+        // ① H2D転送（元画像uint16、32MB）
+        cudaMemcpyAsync(s.d_raw, s.cpu_ptr,
+                        IMG_W * IMG_H * sizeof(uint16_t),
+                        cudaMemcpyHostToDevice, streams_[i]);
+
+        // ② Sobel + タイル収集 + ハン窓（1カーネルで完結）
+        dim3 sgBlock(16, 16);
+        dim3 sgGrid((TILE_W + 15) / 16, (TILE_H + 15) / 16, NUM_TILES);
+        sobelAndGather<<<sgGrid, sgBlock, 0, streams_[i]>>>(
+            s.d_tiles, s.d_raw, s.d_hann_w, s.d_hann_h,
+            IMG_W, IMG_H, TILE_W, TILE_H, NUM_TILES_X);
+
+        // ③ Forward FFT
+        cufftExecC2C(plans_[i], s.d_tiles, s.d_tiles, CUFFT_FORWARD);
+
+        // ④ 位相相関
+        dim3 corrBlock(256);
+        dim3 corrGrid((TILE_W * TILE_H + 255) / 256, NUM_PAIRS);
+        phaseCorrelation<<<corrGrid, corrBlock, 0, streams_[i]>>>(
+            s.d_corr, s.d_tiles, TILE_W * TILE_H, NUM_TILES_X, NUM_TILES_X / 2);
+
+        // ⑤ Inverse FFT
+        cufftExecC2C(iplans_[i], s.d_corr, s.d_corr, CUFFT_INVERSE);
+
+#else
+        // ============================================================
+        // cuFFTDx版フロー
+        // ① H2D転送（元画像そのまま、16MB）
+        // ② gatherHannAndFFT（gather + ハン窓 + FFT を1カーネルで）
+        // ③ 位相相関
+        // ④ inverseFFT2D（cuFFTDxで逆FFT）
+        // ⑤ findPeak
+        // ============================================================
+
+        // ① H2D転送
+        cudaMemcpyAsync(s.d_raw, s.cpu_ptr,
+                        IMG_W * IMG_H * sizeof(uint16_t),
+                        cudaMemcpyHostToDevice, streams_[i]);
+
+        // ② gatherHannAndFFT（1カーネルで完結）
+        gatherHannAndFFT<<<NUM_TILES, FFT_1D::block_dim, 0, streams_[i]>>>(
+            s.d_tiles, s.d_raw, s.d_hann_w, s.d_hann_h,
+            IMG_W, TILE_W, TILE_H, NUM_TILES_X);
+
+        // ③ 位相相関
+        dim3 corrBlock(256);
+        dim3 corrGrid((TILE_W * TILE_H + 255) / 256, NUM_PAIRS);
+        phaseCorrelation<<<corrGrid, corrBlock, 0, streams_[i]>>>(
+            s.d_corr, s.d_tiles, TILE_W * TILE_H, NUM_TILES_X, NUM_TILES_X / 2);
+
+        // ④ Inverse FFT
+        inverseFFT2D<<<NUM_PAIRS, IFFT_1D::block_dim, 0, streams_[i]>>>(
+            s.d_corr, TILE_W);
+
+#endif // USE_CUFFTDX
+
+        // ⑥ findPeak（共通）
+#ifndef USE_WARP_REDUCTION
+        findPeak<<<NUM_PAIRS, 1, 0, streams_[i]>>>(
+            s.d_peaks, s.d_corr, TILE_W, TILE_H, TILE_W * TILE_H);
+#else
+        findPeak<<<NUM_PAIRS, 256, 0, streams_[i]>>>(
+            s.d_peaks, s.d_corr, TILE_W, TILE_H, TILE_W * TILE_H);
+#endif
+
+        cudaStreamEndCapture(streams_[i], &graphs_[i]);
+        cudaGraphInstantiate(&graphExecs_[i], graphs_[i], nullptr, nullptr, 0);
+
+        return true;
+    }
+};
+
+// ============================================================
+// 使用例
+// ============================================================
+//
+// // 切り替えはファイル先頭の#defineだけ
+// // #define USE_CUFFTDX       → cuFFTDx版（並び替え不要）
+// // #define USE_WARP_REDUCTION → findPeakをwarpリダクション版に
+//
+// CudaPipeline pipeline;
+// pipeline.init();
+// pipeline.lockGpuClock();
+//
+// // 各スレッドからそのまま呼ぶ（スロット管理は内部で自動）
+// void imageProcessThread() {
+//     while (running) {
+//         void* cameraData = waitCameraFrame();
+//         Result result = pipeline.process(cameraData);
+//     }
+// }
+//
+// pipeline.unlockGpuClock();
+// pipeline.cleanup();
