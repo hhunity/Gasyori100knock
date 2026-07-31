@@ -1,3 +1,33 @@
+<DataGridTemplateColumn Header="結果" Width="120">
+    <DataGridTemplateColumn.CellStyle>
+        <Style TargetType="DataGridCell">
+            <Style.Triggers>
+                <DataTrigger Binding="{Binding Status}" Value="Pending">
+                    <Setter Property="Background" Value="LightGray"/>
+                </DataTrigger>
+                <DataTrigger Binding="{Binding Status}" Value="Running">
+                    <Setter Property="Background" Value="Gold"/>
+                </DataTrigger>
+                <DataTrigger Binding="{Binding Status}" Value="Pass">
+                    <Setter Property="Background" Value="LimeGreen"/>
+                </DataTrigger>
+                <DataTrigger Binding="{Binding Status}" Value="Fail">
+                    <Setter Property="Background" Value="OrangeRed"/>
+                </DataTrigger>
+            </Style.Triggers>
+        </Style>
+    </DataGridTemplateColumn.CellStyle>
+    <DataGridTemplateColumn.CellTemplate>
+        <DataTemplate>
+            <TextBlock Text="{Binding StatusText}"
+                       FontWeight="Bold" FontSize="16"
+                       HorizontalAlignment="Center" VerticalAlignment="Center"/>
+        </DataTemplate>
+    </DataGridTemplateColumn.CellTemplate>
+</DataGridTemplateColumn>
+
+
+
 public partial class InspectionViewModel : ObservableObject
 {
     public ObservableCollection<TestStep> Steps { get; } = new();
