@@ -10,6 +10,7 @@
       "name": "TC001_Relay_Check",
       "description": "リレーON後、100ms待ってから状態確認",
       "steps": [
+        { "action": "reset" },
         { "action": "setMode", "pin": "RELAY_1",  "mode": "OUTPUT" },
         { "action": "write",   "pin": "RELAY_1",  "value": "HIGH" },
         { "action": "delay",   "ms": 100 },
@@ -21,6 +22,7 @@
       "name": "TC002_LED_Off_Check",
       "description": "LED消灯確認",
       "steps": [
+        { "action": "reset" },
         { "action": "setMode", "pin": "LED_BUILTIN", "mode": "OUTPUT" },
         { "action": "write",   "pin": "LED_BUILTIN", "value": "LOW" },
         { "action": "setMode", "pin": "SENSOR_2",    "mode": "INPUT" },
@@ -34,7 +36,6 @@ using System;
 using System.IO;
 using System.IO.Ports;
 using System.Text.Json;
-using System.Text.Json.Serialization;
 using System.Collections.Generic;
 using System.Threading;
 
@@ -68,14 +69,12 @@ class Program
 
     static void Main()
     {
-        // JSON読み込み
         string json = File.ReadAllText("testcases.json");
         var options = new JsonSerializerOptions { PropertyNameCaseInsensitive = true };
         var data = JsonSerializer.Deserialize<TestCaseFile>(json, options);
 
         pinMap = data.PinNames;
 
-        // シリアルポート準備
         port = new SerialPort("COM3", 9600);
         port.NewLine = "\n";
         port.ReadTimeout = 2000;
@@ -83,7 +82,6 @@ class Program
         Thread.Sleep(2000);
         port.ReadLine();  // "Ready" 読み捨て
 
-        // 全テストケース実行
         foreach (var tc in data.TestCases)
         {
             RunTestCase(tc);
@@ -99,6 +97,7 @@ class Program
 
         foreach (var step in tc.Steps)
         {
+            // --- delay ---
             if (step.Action == "delay")
             {
                 Console.WriteLine($"  Waiting {step.Ms}ms...");
@@ -106,6 +105,14 @@ class Program
                 continue;
             }
 
+            // --- reset ---
+            if (step.Action == "reset")
+            {
+                ResetAllPins();
+                continue;
+            }
+
+            // --- 通常のピン操作(setMode/write/read) ---
             if (!pinMap.TryGetValue(step.Pin, out int pinNumber))
             {
                 Console.WriteLine($"  ERR: unknown pin name '{step.Pin}'");
@@ -143,7 +150,23 @@ class Program
         port.WriteLine(cmd);
         return port.ReadLine().Trim();
     }
+
+    static void ResetAllPins()
+    {
+        foreach (var kv in pinMap)
+        {
+            string pinName = kv.Key;
+            int pinNumber = kv.Value;
+
+            port.WriteLine($"PINMODE {pinNumber} OUTPUT");
+            port.ReadLine();
+            port.WriteLine($"WRITE {pinNumber} LOW");
+            port.ReadLine();
+        }
+        Console.WriteLine("  All pins reset to LOW");
+    }
 }
+
 
 void setup() {
   Serial.begin(9600);
@@ -191,6 +214,5 @@ void handleCommand(String line) {
     Serial.println("ERR: unknown command");
   }
 }
-
 
 
