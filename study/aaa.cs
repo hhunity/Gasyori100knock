@@ -1,127 +1,196 @@
-<DataGridTemplateColumn Header="結果" Width="120">
-    <DataGridTemplateColumn.CellStyle>
-        <Style TargetType="DataGridCell">
-            <Style.Triggers>
-                <DataTrigger Binding="{Binding Status}" Value="Pending">
-                    <Setter Property="Background" Value="LightGray"/>
-                </DataTrigger>
-                <DataTrigger Binding="{Binding Status}" Value="Running">
-                    <Setter Property="Background" Value="Gold"/>
-                </DataTrigger>
-                <DataTrigger Binding="{Binding Status}" Value="Pass">
-                    <Setter Property="Background" Value="LimeGreen"/>
-                </DataTrigger>
-                <DataTrigger Binding="{Binding Status}" Value="Fail">
-                    <Setter Property="Background" Value="OrangeRed"/>
-                </DataTrigger>
-            </Style.Triggers>
-        </Style>
-    </DataGridTemplateColumn.CellStyle>
-    <DataGridTemplateColumn.CellTemplate>
-        <DataTemplate>
-            <TextBlock Text="{Binding StatusText}"
-                       FontWeight="Bold" FontSize="16"
-                       HorizontalAlignment="Center" VerticalAlignment="Center"/>
-        </DataTemplate>
-    </DataGridTemplateColumn.CellTemplate>
-</DataGridTemplateColumn>
-
-
-
-public partial class InspectionViewModel : ObservableObject
 {
-    public ObservableCollection<TestStep> Steps { get; } = new();
-
-    [ObservableProperty]
-    private bool isRunning;
-
-    public IAsyncRelayCommand RunAllCommand { get; }
-
-    public InspectionViewModel()
+  "pinNames": {
+    "LED_BUILTIN": 13,
+    "RELAY_1": 9,
+    "SENSOR_1": 7,
+    "SENSOR_2": 8
+  },
+  "testCases": [
     {
-        // あらかじめ全項目を並べておく
-        Steps.Add(new TestStep("電源電圧チェック"));
-        Steps.Add(new TestStep("通信確認"));
-        Steps.Add(new TestStep("外観検査"));
-        Steps.Add(new TestStep("動作確認"));
-
-        RunAllCommand = new AsyncRelayCommand(RunAllAsync, () => !IsRunning);
+      "name": "TC001_Relay_Check",
+      "description": "リレーON後、100ms待ってから状態確認",
+      "steps": [
+        { "action": "setMode", "pin": "RELAY_1",  "mode": "OUTPUT" },
+        { "action": "write",   "pin": "RELAY_1",  "value": "HIGH" },
+        { "action": "delay",   "ms": 100 },
+        { "action": "setMode", "pin": "SENSOR_1", "mode": "INPUT" },
+        { "action": "read",    "pin": "SENSOR_1", "expected": "HIGH" }
+      ]
+    },
+    {
+      "name": "TC002_LED_Off_Check",
+      "description": "LED消灯確認",
+      "steps": [
+        { "action": "setMode", "pin": "LED_BUILTIN", "mode": "OUTPUT" },
+        { "action": "write",   "pin": "LED_BUILTIN", "value": "LOW" },
+        { "action": "setMode", "pin": "SENSOR_2",    "mode": "INPUT" },
+        { "action": "read",    "pin": "SENSOR_2",    "expected": "LOW" }
+      ]
     }
+  ]
+}
 
-    private async Task RunAllAsync()
+using System;
+using System.IO;
+using System.IO.Ports;
+using System.Text.Json;
+using System.Text.Json.Serialization;
+using System.Collections.Generic;
+using System.Threading;
+
+public class Step
+{
+    public string Action { get; set; }
+    public string Pin { get; set; }
+    public string Mode { get; set; }
+    public string Value { get; set; }
+    public string Expected { get; set; }
+    public int Ms { get; set; }
+}
+
+public class TestCase
+{
+    public string Name { get; set; }
+    public string Description { get; set; }
+    public List<Step> Steps { get; set; }
+}
+
+public class TestCaseFile
+{
+    public Dictionary<string, int> PinNames { get; set; }
+    public List<TestCase> TestCases { get; set; }
+}
+
+class Program
+{
+    static SerialPort port;
+    static Dictionary<string, int> pinMap;
+
+    static void Main()
     {
-        IsRunning = true;
+        // JSON読み込み
+        string json = File.ReadAllText("testcases.json");
+        var options = new JsonSerializerOptions { PropertyNameCaseInsensitive = true };
+        var data = JsonSerializer.Deserialize<TestCaseFile>(json, options);
 
-        foreach (var step in Steps)
+        pinMap = data.PinNames;
+
+        // シリアルポート準備
+        port = new SerialPort("COM3", 9600);
+        port.NewLine = "\n";
+        port.ReadTimeout = 2000;
+        port.Open();
+        Thread.Sleep(2000);
+        port.ReadLine();  // "Ready" 読み捨て
+
+        // 全テストケース実行
+        foreach (var tc in data.TestCases)
         {
-            step.Status = TestStatus.Running;
-            bool ok = await SimulateTestAsync();
-            step.Status = ok ? TestStatus.Pass : TestStatus.Fail;
-
-            if (!ok) break;
+            RunTestCase(tc);
         }
 
-        IsRunning = false;
+        port.Close();
     }
 
-    private async Task<bool> SimulateTestAsync()
+    static void RunTestCase(TestCase tc)
     {
-        await Task.Delay(500);
-        return true;
+        Console.WriteLine($"=== {tc.Name}: {tc.Description} ===");
+        bool pass = true;
+
+        foreach (var step in tc.Steps)
+        {
+            if (step.Action == "delay")
+            {
+                Console.WriteLine($"  Waiting {step.Ms}ms...");
+                Thread.Sleep(step.Ms);
+                continue;
+            }
+
+            if (!pinMap.TryGetValue(step.Pin, out int pinNumber))
+            {
+                Console.WriteLine($"  ERR: unknown pin name '{step.Pin}'");
+                pass = false;
+                continue;
+            }
+
+            string result = RunStep(step, pinNumber);
+
+            if (step.Action == "read" && step.Expected != null)
+            {
+                bool ok = (result == step.Expected);
+                Console.WriteLine($"  {step.Pin}(D{pinNumber}): got={result}, expected={step.Expected} → {(ok ? "PASS" : "FAIL")}");
+                if (!ok) pass = false;
+            }
+            else
+            {
+                Console.WriteLine($"  {step.Action} {step.Pin}(D{pinNumber}): {result}");
+            }
+        }
+
+        Console.WriteLine(pass ? $"{tc.Name}: PASS\n" : $"{tc.Name}: FAIL\n");
+    }
+
+    static string RunStep(Step step, int pinNumber)
+    {
+        string cmd = step.Action switch
+        {
+            "setMode" => $"PINMODE {pinNumber} {step.Mode}",
+            "write"   => $"WRITE {pinNumber} {step.Value}",
+            "read"    => $"READ {pinNumber}",
+            _ => throw new Exception($"unknown action: {step.Action}")
+        };
+
+        port.WriteLine(cmd);
+        return port.ReadLine().Trim();
     }
 }
 
-public partial class TestStep : ObservableObject
-{
-    public string Name { get; }
+void setup() {
+  Serial.begin(9600);
+  Serial.println("Ready");
+}
 
-    [ObservableProperty]
-    [NotifyPropertyChangedFor(nameof(StatusText))]
-    private TestStatus status = TestStatus.Pending;
+void loop() {
+  if (Serial.available() > 0) {
+    String line = Serial.readStringUntil('\n');
+    line.trim();
+    handleCommand(line);
+  }
+}
 
-    public string StatusText => Status switch
-    {
-        TestStatus.Pending => "-",
-        TestStatus.Running => "実行中",
-        TestStatus.Pass => "PASS",
-        TestStatus.Fail => "FAIL",
-        _ => ""
-    };
+void handleCommand(String line) {
+  int sp1 = line.indexOf(' ');
+  String cmd = line.substring(0, sp1);
+  String rest = line.substring(sp1 + 1);
 
-    public TestStep(string name) => Name = name;
+  if (cmd == "PINMODE") {
+    int sp2 = rest.indexOf(' ');
+    int pin = rest.substring(0, sp2).toInt();
+    String mode = rest.substring(sp2 + 1);
+
+    if (mode == "OUTPUT") pinMode(pin, OUTPUT);
+    else if (mode == "INPUT") pinMode(pin, INPUT);
+    else if (mode == "INPUT_PULLUP") pinMode(pin, INPUT_PULLUP);
+
+    Serial.println("OK");
+  }
+  else if (cmd == "WRITE") {
+    int sp2 = rest.indexOf(' ');
+    int pin = rest.substring(0, sp2).toInt();
+    String value = rest.substring(sp2 + 1);
+
+    digitalWrite(pin, value == "HIGH" ? HIGH : LOW);
+    Serial.println("OK");
+  }
+  else if (cmd == "READ") {
+    int pin = rest.toInt();
+    int value = digitalRead(pin);
+    Serial.println(value == HIGH ? "HIGH" : "LOW");
+  }
+  else {
+    Serial.println("ERR: unknown command");
+  }
 }
 
 
-<Window.Resources>
-    <local:StatusToBrushConverter x:Key="StatusToBrush"/>
-</Window.Resources>
-
-<StackPanel>
-    <Button Content="検査開始" Command="{Binding RunAllCommand}"
-            Width="120" Height="40" Margin="10"/>
-
-    <DataGrid ItemsSource="{Binding Steps}"
-              AutoGenerateColumns="False"
-              IsReadOnly="True"
-              HeadersVisibility="Column"
-              CanUserAddRows="False"
-              GridLinesVisibility="Horizontal"
-              RowHeight="40">
-        <DataGrid.Columns>
-            <DataGridTextColumn Header="項目" Binding="{Binding Name}" Width="*"/>
-            <DataGridTemplateColumn Header="結果" Width="120">
-                <DataGridTemplateColumn.CellTemplate>
-                    <DataTemplate>
-                        <TextBlock Text="{Binding StatusText}"
-                                   FontWeight="Bold"
-                                   FontSize="16"
-                                   HorizontalAlignment="Center"
-                                   VerticalAlignment="Center"
-                                   Foreground="{Binding Status, Converter={StaticResource StatusToBrush}}"/>
-                    </DataTemplate>
-                </DataGridTemplateColumn.CellTemplate>
-            </DataGridTemplateColumn>
-        </DataGrid.Columns>
-    </DataGrid>
-</StackPanel>
 
