@@ -1,218 +1,435 @@
+using System.Globalization;
+using System.Windows;
+using System.Windows.Data;
+
+namespace FirmwareWizard;
+
+public class StepIndexToVisibilityConverter : IValueConverter
 {
-  "pinNames": {
-    "LED_BUILTIN": 13,
-    "RELAY_1": 9,
-    "SENSOR_1": 7,
-    "SENSOR_2": 8
-  },
-  "testCases": [
+    public object Convert(object? value, Type targetType, object? parameter, CultureInfo culture)
     {
-      "name": "TC001_Relay_Check",
-      "description": "リレーON後、100ms待ってから状態確認",
-      "steps": [
-        { "action": "reset" },
-        { "action": "setMode", "pin": "RELAY_1",  "mode": "OUTPUT" },
-        { "action": "write",   "pin": "RELAY_1",  "value": "HIGH" },
-        { "action": "delay",   "ms": 100 },
-        { "action": "setMode", "pin": "SENSOR_1", "mode": "INPUT" },
-        { "action": "read",    "pin": "SENSOR_1", "expected": "HIGH" }
-      ]
-    },
-    {
-      "name": "TC002_LED_Off_Check",
-      "description": "LED消灯確認",
-      "steps": [
-        { "action": "reset" },
-        { "action": "setMode", "pin": "LED_BUILTIN", "mode": "OUTPUT" },
-        { "action": "write",   "pin": "LED_BUILTIN", "value": "LOW" },
-        { "action": "setMode", "pin": "SENSOR_2",    "mode": "INPUT" },
-        { "action": "read",    "pin": "SENSOR_2",    "expected": "LOW" }
-      ]
+        if (value is int currentStep && parameter is string targetStepStr && int.TryParse(targetStepStr, out var targetStep))
+            return currentStep == targetStep ? Visibility.Visible : Visibility.Collapsed;
+
+        return Visibility.Collapsed;
     }
-  ]
+
+    public object ConvertBack(object? value, Type targetType, object? parameter, CultureInfo culture)
+        => throw new NotSupportedException();
 }
 
-using System;
+using System.Collections.ObjectModel;
+using System.Diagnostics;
 using System.IO;
 using System.IO.Ports;
-using System.Text.Json;
-using System.Collections.Generic;
-using System.Threading;
+using System.Windows.Media;
+using System.Windows.Threading;
+using CommunityToolkit.Mvvm.ComponentModel;
+using CommunityToolkit.Mvvm.Input;
+using Microsoft.Win32;
 
-public class Step
+namespace FirmwareWizard;
+
+public partial class MainViewModel : ObservableObject
 {
-    public string Action { get; set; }
-    public string Pin { get; set; }
-    public string Mode { get; set; }
-    public string Value { get; set; }
-    public string Expected { get; set; }
-    public int Ms { get; set; }
-}
+    private readonly string _avrdudePath = Path.Combine(AppContext.BaseDirectory, "tools", "avrdude", "avrdude.exe");
+    private readonly string _avrdudeConfPath = Path.Combine(AppContext.BaseDirectory, "tools", "avrdude", "avrdude.conf");
 
-public class TestCase
-{
-    public string Name { get; set; }
-    public string Description { get; set; }
-    public List<Step> Steps { get; set; }
-}
-
-public class TestCaseFile
-{
-    public Dictionary<string, int> PinNames { get; set; }
-    public List<TestCase> TestCases { get; set; }
-}
-
-class Program
-{
-    static SerialPort port;
-    static Dictionary<string, int> pinMap;
-
-    static void Main()
+    public MainViewModel()
     {
-        string json = File.ReadAllText("testcases.json");
-        var options = new JsonSerializerOptions { PropertyNameCaseInsensitive = true };
-        var data = JsonSerializer.Deserialize<TestCaseFile>(json, options);
-
-        pinMap = data.PinNames;
-
-        port = new SerialPort("COM3", 9600);
-        port.NewLine = "\n";
-        port.ReadTimeout = 2000;
-        port.Open();
-        Thread.Sleep(2000);
-        port.ReadLine();  // "Ready" 読み捨て
-
-        foreach (var tc in data.TestCases)
-        {
-            RunTestCase(tc);
-        }
-
-        port.Close();
+        RefreshPorts();
     }
 
-    static void RunTestCase(TestCase tc)
+    // ==================== ステップ管理 ====================
+
+    [ObservableProperty]
+    private int currentStep;
+
+    partial void OnCurrentStepChanged(int value)
     {
-        Console.WriteLine($"=== {tc.Name}: {tc.Description} ===");
-        bool pass = true;
-
-        foreach (var step in tc.Steps)
-        {
-            // --- delay ---
-            if (step.Action == "delay")
-            {
-                Console.WriteLine($"  Waiting {step.Ms}ms...");
-                Thread.Sleep(step.Ms);
-                continue;
-            }
-
-            // --- reset ---
-            if (step.Action == "reset")
-            {
-                ResetAllPins();
-                continue;
-            }
-
-            // --- 通常のピン操作(setMode/write/read) ---
-            if (!pinMap.TryGetValue(step.Pin, out int pinNumber))
-            {
-                Console.WriteLine($"  ERR: unknown pin name '{step.Pin}'");
-                pass = false;
-                continue;
-            }
-
-            string result = RunStep(step, pinNumber);
-
-            if (step.Action == "read" && step.Expected != null)
-            {
-                bool ok = (result == step.Expected);
-                Console.WriteLine($"  {step.Pin}(D{pinNumber}): got={result}, expected={step.Expected} → {(ok ? "PASS" : "FAIL")}");
-                if (!ok) pass = false;
-            }
-            else
-            {
-                Console.WriteLine($"  {step.Action} {step.Pin}(D{pinNumber}): {result}");
-            }
-        }
-
-        Console.WriteLine(pass ? $"{tc.Name}: PASS\n" : $"{tc.Name}: FAIL\n");
+        OnPropertyChanged(nameof(TitleText));
+        OnPropertyChanged(nameof(NextButtonText));
+        OnPropertyChanged(nameof(IsBackVisible));
+        NextCommand.NotifyCanExecuteChanged();
+        BackCommand.NotifyCanExecuteChanged();
     }
 
-    static string RunStep(Step step, int pinNumber)
+    public string TitleText => CurrentStep switch
     {
-        string cmd = step.Action switch
+        0 => "ステップ 1 / 5: COMポート選択",
+        1 => "ステップ 2 / 5: ファーム選択",
+        2 => "ステップ 3 / 5: 確認",
+        3 => "ステップ 4 / 5: 書き込み中",
+        4 => "ステップ 5 / 5: 完了",
+        _ => ""
+    };
+
+    public string NextButtonText => CurrentStep switch
+    {
+        2 => "書き込み開始",
+        4 => "閉じる",
+        _ => "次へ"
+    };
+
+    public bool IsBackVisible => CurrentStep != 4;
+
+    // ==================== Step 1: COMポート(差分検出) ====================
+
+    public ObservableCollection<string> ComPorts { get; } = new();
+
+    [ObservableProperty]
+    private string? selectedPort;
+
+    partial void OnSelectedPortChanged(string? value) => NextCommand.NotifyCanExecuteChanged();
+
+    public ObservableCollection<string> BaudRates { get; } = new() { "115200", "57600", "9600" };
+
+    [ObservableProperty]
+    private string selectedBaudRate = "115200";
+
+    [ObservableProperty]
+    private string detectStatusText = "";
+
+    [ObservableProperty]
+    private Brush detectStatusColor = Brushes.Gray;
+
+    [ObservableProperty]
+    private bool isDetecting;
+
+    partial void OnIsDetectingChanged(bool value)
+    {
+        AutoDetectCommand.NotifyCanExecuteChanged();
+        NextCommand.NotifyCanExecuteChanged();
+    }
+
+    private DispatcherTimer? _detectTimer;
+    private HashSet<string> _portsBeforeDetect = new();
+    private int _detectElapsedTicks;
+    private const int DetectTimeoutSeconds = 15;
+
+    [RelayCommand(CanExecute = nameof(CanAutoDetect))]
+    private void AutoDetect()
+    {
+        _portsBeforeDetect = SerialPort.GetPortNames().ToHashSet();
+        _detectElapsedTicks = 0;
+
+        IsDetecting = true;
+        DetectStatusText = "USBケーブルを接続してください...";
+        DetectStatusColor = Brushes.DarkOrange;
+
+        _detectTimer = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(500) };
+        _detectTimer.Tick += DetectTimer_Tick;
+        _detectTimer.Start();
+    }
+
+    private bool CanAutoDetect() => !IsDetecting;
+
+    private void DetectTimer_Tick(object? sender, EventArgs e)
+    {
+        var currentPorts = SerialPort.GetPortNames().ToHashSet();
+        var newPorts = currentPorts.Except(_portsBeforeDetect).ToList();
+
+        if (newPorts.Count > 0)
         {
-            "setMode" => $"PINMODE {pinNumber} {step.Mode}",
-            "write"   => $"WRITE {pinNumber} {step.Value}",
-            "read"    => $"READ {pinNumber}",
-            _ => throw new Exception($"unknown action: {step.Action}")
+            StopDetectTimer();
+
+            var detectedPort = newPorts.First();
+            RefreshPorts();
+            SelectedPort = detectedPort;
+
+            DetectStatusText = $"検出しました: {detectedPort}";
+            DetectStatusColor = Brushes.SeaGreen;
+            IsDetecting = false;
+            return;
+        }
+
+        _detectElapsedTicks++;
+        if (_detectElapsedTicks * 0.5 >= DetectTimeoutSeconds)
+        {
+            StopDetectTimer();
+            DetectStatusText = "検出できませんでした。手動でポートを選択してください。";
+            DetectStatusColor = Brushes.Firebrick;
+            IsDetecting = false;
+        }
+    }
+
+    private void StopDetectTimer()
+    {
+        _detectTimer?.Stop();
+        _detectTimer = null;
+    }
+
+    [RelayCommand]
+    private void RefreshPorts()
+    {
+        var selected = SelectedPort;
+        ComPorts.Clear();
+        foreach (var p in SerialPort.GetPortNames().OrderBy(p => p))
+            ComPorts.Add(p);
+
+        if (selected != null && ComPorts.Contains(selected))
+            SelectedPort = selected;
+        else if (ComPorts.Count > 0)
+            SelectedPort = ComPorts[0];
+    }
+
+    // ==================== Step 2: HEXファイル ====================
+
+    [ObservableProperty]
+    private string hexPath = "";
+
+    partial void OnHexPathChanged(string value) => NextCommand.NotifyCanExecuteChanged();
+
+    [RelayCommand]
+    private void BrowseHex()
+    {
+        var dialog = new OpenFileDialog
+        {
+            Filter = "HEXファイル (*.hex)|*.hex|すべてのファイル (*.*)|*.*",
+            Title = "ファームウェアファイルを選択"
         };
 
-        port.WriteLine(cmd);
-        return port.ReadLine().Trim();
+        if (dialog.ShowDialog() == true)
+            HexPath = dialog.FileName;
     }
 
-    static void ResetAllPins()
+    // ==================== Step 4: 書き込み ====================
+
+    [ObservableProperty]
+    private string logText = "";
+
+    [ObservableProperty]
+    private bool isFlashing;
+
+    [ObservableProperty]
+    private string resultText = "";
+
+    [ObservableProperty]
+    private Brush resultColor = Brushes.Black;
+
+    [ObservableProperty]
+    private string resultDetailText = "";
+
+    private void AppendLog(string line) => LogText += line + Environment.NewLine;
+
+    private Task RunAvrdudeAsync()
     {
-        foreach (var kv in pinMap)
+        IsFlashing = true;
+        var comPort = SelectedPort ?? "";
+        var baud = SelectedBaudRate;
+        var hexPathLocal = HexPath;
+
+        LogText = "";
+        AppendLog($"avrdude を実行します: ポート={comPort}, ボーレート={baud}");
+        AppendLog($"HEXファイル: {hexPathLocal}");
+        AppendLog("----------------------------------------");
+
+        var tcs = new TaskCompletionSource();
+
+        var psi = new ProcessStartInfo
         {
-            string pinName = kv.Key;
-            int pinNumber = kv.Value;
+            FileName = _avrdudePath,
+            Arguments = $"-c wiring -p atmega2560 -P {comPort} -b {baud} -D -U flash:w:\"{hexPathLocal}\":i -C \"{_avrdudeConfPath}\"",
+            RedirectStandardOutput = true,
+            RedirectStandardError = true,
+            UseShellExecute = false,
+            CreateNoWindow = true
+        };
 
-            port.WriteLine($"PINMODE {pinNumber} OUTPUT");
-            port.ReadLine();
-            port.WriteLine($"WRITE {pinNumber} LOW");
-            port.ReadLine();
+        var process = new Process { StartInfo = psi, EnableRaisingEvents = true };
+        process.OutputDataReceived += (s, e) => { if (e.Data != null) AppendLog(e.Data); };
+        process.ErrorDataReceived += (s, e) => { if (e.Data != null) AppendLog(e.Data); };
+
+        process.Exited += (s, e) =>
+        {
+            var succeeded = process.ExitCode == 0;
+            IsFlashing = false;
+
+            AppendLog("----------------------------------------");
+            AppendLog(succeeded ? "書き込みが正常に完了しました。" : $"書き込みに失敗しました。(終了コード: {process.ExitCode})");
+
+            ResultText = succeeded ? "✅ 書き込みが完了しました" : "❌ 書き込みに失敗しました";
+            ResultColor = succeeded ? Brushes.SeaGreen : Brushes.Firebrick;
+            ResultDetailText = succeeded
+                ? "Arduino Megaへのファームウェア更新が完了しました。"
+                : "ログを確認し、COMポート・ケーブル接続・HEXファイルを確認してください。";
+
+            tcs.TrySetResult();
+        };
+
+        try
+        {
+            process.Start();
+            process.BeginOutputReadLine();
+            process.BeginErrorReadLine();
         }
-        Console.WriteLine("  All pins reset to LOW");
+        catch (Exception ex)
+        {
+            IsFlashing = false;
+            AppendLog($"avrdudeの起動に失敗しました: {ex.Message}");
+            AppendLog($"確認したパス: {_avrdudePath}");
+
+            ResultText = "❌ avrdudeの起動に失敗しました";
+            ResultColor = Brushes.Firebrick;
+            ResultDetailText = "avrdude.exeの配置パスが正しいか確認してください。";
+
+            tcs.TrySetResult();
+        }
+
+        return tcs.Task;
     }
+
+    // ==================== 次へ/戻る ====================
+
+    [RelayCommand(CanExecute = nameof(CanGoNext))]
+    private async Task Next()
+    {
+        switch (CurrentStep)
+        {
+            case 0:
+                CurrentStep = 1;
+                break;
+
+            case 1:
+                CurrentStep = 2;
+                break;
+
+            case 2:
+                CurrentStep = 3;
+                await RunAvrdudeAsync();
+                CurrentStep = 4;
+                break;
+
+            case 4:
+                System.Windows.Application.Current.Shutdown();
+                break;
+        }
+    }
+
+    private bool CanGoNext()
+    {
+        if (IsFlashing) return false;
+
+        return CurrentStep switch
+        {
+            0 => !string.IsNullOrEmpty(SelectedPort),
+            1 => !string.IsNullOrEmpty(HexPath) && File.Exists(HexPath),
+            3 => false,
+            _ => true
+        };
+    }
+
+    [RelayCommand(CanExecute = nameof(CanGoBack))]
+    private void Back()
+    {
+        if (CurrentStep > 0) CurrentStep--;
+    }
+
+    private bool CanGoBack() => CurrentStep > 0 && CurrentStep != 3 && !IsFlashing;
 }
 
+<Window x:Class="FirmwareWizard.MainWindow"
+        xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        xmlns:local="clr-namespace:FirmwareWizard"
+        Title="ファームウェア更新ウィザード"
+        Height="440" Width="560"
+        WindowStartupLocation="CenterScreen"
+        ResizeMode="NoResize">
 
-void setup() {
-  Serial.begin(9600);
-  Serial.println("Ready");
-}
+    <Window.DataContext>
+        <local:MainViewModel/>
+    </Window.DataContext>
 
-void loop() {
-  if (Serial.available() > 0) {
-    String line = Serial.readStringUntil('\n');
-    line.trim();
-    handleCommand(line);
-  }
-}
+ <Window.Resources>
+    <local:StepIndexToVisibilityConverter x:Key="StepConverter"/>
+    <BooleanToVisibilityConverter x:Key="BoolToVis"/>
+</Window.Resources>
 
-void handleCommand(String line) {
-  int sp1 = line.indexOf(' ');
-  String cmd = line.substring(0, sp1);
-  String rest = line.substring(sp1 + 1);
 
-  if (cmd == "PINMODE") {
-    int sp2 = rest.indexOf(' ');
-    int pin = rest.substring(0, sp2).toInt();
-    String mode = rest.substring(sp2 + 1);
+    <Grid Margin="20">
+        <Grid.RowDefinitions>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="*"/>
+            <RowDefinition Height="Auto"/>
+        </Grid.RowDefinitions>
 
-    if (mode == "OUTPUT") pinMode(pin, OUTPUT);
-    else if (mode == "INPUT") pinMode(pin, INPUT);
-    else if (mode == "INPUT_PULLUP") pinMode(pin, INPUT_PULLUP);
+        <TextBlock Grid.Row="0" Text="{Binding TitleText}"
+                   FontSize="18" FontWeight="Bold" Margin="0,0,0,15"/>
 
-    Serial.println("OK");
-  }
-  else if (cmd == "WRITE") {
-    int sp2 = rest.indexOf(' ');
-    int pin = rest.substring(0, sp2).toInt();
-    String value = rest.substring(sp2 + 1);
+        <Grid Grid.Row="1">
 
-    digitalWrite(pin, value == "HIGH" ? HIGH : LOW);
-    Serial.println("OK");
-  }
-  else if (cmd == "READ") {
-    int pin = rest.toInt();
-    int value = digitalRead(pin);
-    Serial.println(value == HIGH ? "HIGH" : "LOW");
-  }
-  else {
-    Serial.println("ERR: unknown command");
-  }
-}
+            <!-- Step 1: COMポート選択(差分検出方式) -->
+            <StackPanel Visibility="{Binding CurrentStep, Converter={StaticResource StepConverter}, ConverterParameter=0}">
+                <TextBlock Text="Arduino Megaをまだ接続していない状態で「自動検出」を押し、" Margin="0,0,0,2"/>
+                <TextBlock Text="指示が出たらUSBケーブルを差し込んでください。" Margin="0,0,0,10"/>
+
+                <StackPanel Orientation="Horizontal" Margin="0,0,0,10">
+                    <Button Content="自動検出" Width="100" Command="{Binding AutoDetectCommand}"/>
+                    <TextBlock Text="{Binding DetectStatusText}" Foreground="{Binding DetectStatusColor}"
+                               VerticalAlignment="Center" Margin="10,0,0,0"/>
+                </StackPanel>
+
+                <StackPanel Orientation="Horizontal" Margin="0,0,0,10">
+                    <TextBlock Text="検出結果 / 手動選択: " VerticalAlignment="Center" Margin="0,0,10,0"/>
+                    <ComboBox Width="150" Margin="0,0,10,0"
+                              ItemsSource="{Binding ComPorts}" SelectedItem="{Binding SelectedPort}"/>
+                    <Button Content="一覧更新" Width="80" Command="{Binding RefreshPortsCommand}"/>
+                </StackPanel>
+
+                <StackPanel Orientation="Horizontal">
+                    <TextBlock Text="ボーレート: " VerticalAlignment="Center" Margin="0,0,10,0"/>
+                    <ComboBox Width="120" ItemsSource="{Binding BaudRates}" SelectedItem="{Binding SelectedBaudRate}"/>
+                </StackPanel>
+            </StackPanel>
+
+            <!-- Step 2: HEXファイル選択 -->
+            <StackPanel Visibility="{Binding CurrentStep, Converter={StaticResource StepConverter}, ConverterParameter=1}">
+                <TextBlock Text="書き込むファームウェア(.hex)ファイルを選択してください。" Margin="0,0,0,10"/>
+                <StackPanel Orientation="Horizontal">
+                    <TextBox Width="330" Margin="0,0,10,0" IsReadOnly="True" Text="{Binding HexPath, Mode=OneWay}"/>
+                    <Button Content="参照..." Width="80" Command="{Binding BrowseHexCommand}"/>
+                </StackPanel>
+            </StackPanel>
+
+            <!-- Step 3: 確認画面 -->
+            <StackPanel Visibility="{Binding CurrentStep, Converter={StaticResource StepConverter}, ConverterParameter=2}">
+                <TextBlock Text="以下の内容で書き込みを行います。よろしいですか?" Margin="0,0,0,15" FontWeight="Bold"/>
+                <TextBlock Text="COMポート:" FontWeight="SemiBold"/>
+                <TextBlock Text="{Binding SelectedPort}" Margin="0,0,0,10"/>
+                <TextBlock Text="ボーレート:" FontWeight="SemiBold"/>
+                <TextBlock Text="{Binding SelectedBaudRate}" Margin="0,0,0,10"/>
+                <TextBlock Text="HEXファイル:" FontWeight="SemiBold"/>
+                <TextBlock Text="{Binding HexPath}" TextWrapping="Wrap"/>
+            </StackPanel>
+
+            <!-- Step 4: 書き込み中 -->
+            <StackPanel Visibility="{Binding CurrentStep, Converter={StaticResource StepConverter}, ConverterParameter=3}">
+                <TextBlock Text="書き込み中です。しばらくお待ちください..." Margin="0,0,0,10"/>
+                <ProgressBar Height="20" IsIndeterminate="True" Margin="0,0,0,10"/>
+                <TextBox Height="200" IsReadOnly="True" Text="{Binding LogText, Mode=OneWay}"
+                         VerticalScrollBarVisibility="Auto" TextWrapping="NoWrap"
+                         FontFamily="Consolas" FontSize="11" Background="#1E1E1E" Foreground="#DCDCDC"/>
+            </StackPanel>
+
+            <!-- Step 5: 完了 -->
+            <StackPanel Visibility="{Binding CurrentStep, Converter={StaticResource StepConverter}, ConverterParameter=4}">
+                <TextBlock Text="{Binding ResultText}" Foreground="{Binding ResultColor}"
+                           FontSize="16" FontWeight="Bold" Margin="0,20,0,10"/>
+                <TextBlock Text="{Binding ResultDetailText}" TextWrapping="Wrap"/>
+            </StackPanel>
+
+        </Grid>
+
+        <StackPanel Grid.Row="2" Orientation="Horizontal" HorizontalAlignment="Right" Margin="0,15,0,0">
+            <Button Content="戻る" Width="90" Height="30" Margin="0,0,10,0"
+                    Command="{Binding BackCommand}" Visibility="{Binding IsBackVisible, Converter={StaticResource BoolToVis}}"/>
+            <Button Content="{Binding NextButtonText}" Width="90" Height="30" Command="{Binding NextCommand}"/>
+        </StackPanel>
+
+    </Grid>
+</Window>
+
+
 
 
